@@ -69,6 +69,8 @@ func Discover(r io.Reader, uuids UUIDs) ([]Mount, error) {
 		m := &mounts[i]
 		values := uuids[m.Device]
 		switch {
+		case m.Filesystem == "btrfs":
+			m.Denied = "btrfs denied in S1: subvolume and snapshot containment unassessed"
 		case !supported(m.Filesystem):
 			m.Denied = "unsupported filesystem"
 		case len(values) != 1 || values[0] == "":
@@ -91,7 +93,7 @@ func Discover(r io.Reader, uuids UUIDs) ([]Mount, error) {
 // Explicit allowlist: virtual, network, FUSE and unknown filesystems fail closed.
 func supported(fs string) bool {
 	switch fs {
-	case "ext2", "ext3", "ext4", "btrfs", "xfs", "f2fs", "vfat", "exfat", "ntfs3":
+	case "ext2", "ext3", "ext4", "xfs", "f2fs", "vfat", "exfat", "ntfs3":
 		return true
 	default:
 		return false
