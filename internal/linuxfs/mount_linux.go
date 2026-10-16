@@ -16,7 +16,7 @@ import (
 // This root owns its snapshot and copies protected identities; callers may close
 // their discovery snapshot and Protected after this function returns.
 func OpenVerified(m volumes.Mount, protected []string, identities *Protected) (*Root, error) {
-	if m.Denied != "" || m.Key == "" || m.UUID == "" || m.Filesystem == "btrfs" {
+	if m.Denied != "" || m.Key == "" || m.UUID == "" {
 		return nil, ErrMount
 	}
 	r, err := openRoot(m.Mountpoint, protected, identities, unix.Fstatfs)
@@ -51,7 +51,31 @@ func OpenVerified(m volumes.Mount, protected []string, identities *Protected) (*
 		r.Close()
 		return nil, err
 	}
+	if m.Filesystem == "btrfs" {
+		if err := r.bindBtrfsUUID(m.UUID, volumes.BtrfsUUID); err != nil {
+			r.Close()
+			return nil, err
+		}
+	}
+	if err := r.Validate(); err != nil {
+		r.Close()
+		return nil, err
+	}
 	return r, nil
+}
+
+// Production roots already require STATX_SUBVOL during openRoot. Keep this
+// condition here too so UUID success can never bypass subvolume confinement.
+func (r *Root) bindBtrfsUUID(expected string, probe func(int) (string, error)) error {
+	if r.subvolume == nil {
+		return ErrSubvolume
+	}
+	uuid, err := probe(r.fd)
+	if err != nil || uuid == "" || uuid != expected {
+		r.invalid.Store(true)
+		return fmt.Errorf("%w: btrfs filesystem UUID unavailable or different", ErrMount)
+	}
+	return nil
 }
 
 // VerifyMount does not establish discovery approval; use OpenVerified for that.

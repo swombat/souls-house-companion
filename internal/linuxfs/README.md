@@ -13,6 +13,8 @@ Production integration:
    device major/minor, and requires the fd's `STATX_ATTR_MOUNT_ROOT` support bit
    and attribute. A same-mount ancestor/subdirectory cannot substitute for the
    mount root. It owns duplicated identity pins and its own snapshot.
+   For Btrfs it also compares the retained root's `BTRFS_IOC_FS_INFO` filesystem
+   UUID with the discovered UUID, then revalidates the mount snapshot.
    The caller may then close the capture and discovery snapshot.
 4. `Read`, `Stat`, `List` check mount snapshots before and after work. Call
    `root.Validate()` immediately before delivery as well. Every public root
@@ -64,16 +66,26 @@ rescan pagination, not an atomic filesystem snapshot.
   grant access to a root where aliases could disclose it.
 - Every looked-up inode, walked ancestor, and readable reopen must match the
   root's actual `st_dev`; `NO_XDEV` alone is not a subvolume boundary.
-  Fixture `Open` on Btrfs additionally requires `STATX_SUBVOL` at opening and on
+  Both fixture `Open` and production `OpenVerified` on Btrfs require
+  `STATX_SUBVOL` at opening and on
   every such handle, with an equal subvolume ID. Missing support fails closed.
-  Btrfs production discovery/`OpenVerified` remain explicitly denied: the
-  current by-uuid resolver maps backing block devices, whereas Btrfs mountinfo
-  uses anonymous subvolume device IDs. UUID binding and real target-host
-  subvolume/snapshot tests remain unassessed; injected statx tests are not
-  physical Btrfs acceptance.
-- Live UUID resolution uses `/dev/disk/by-uuid` readlink plus block-device stat.
+  Production discovery opens each Btrfs mount, requires statx mount ID,
+  device, `MOUNT_ROOT` and `SUBVOL` support, and obtains the filesystem UUID
+  with `BTRFS_IOC_FS_INFO`. It does not map anonymous subvolume device IDs
+  through backing block devices or trust mount-source strings. Metadata-only
+  `volumes.Discover` cannot approve Btrfs; `LoadSystem` supplies the fd probe.
+  Duplicate/bind aliases and stacked mounts remain denied.
+  Root descriptors are `O_PATH`; FS_INFO uses an fd-relative `openat2(".")`
+  readable directory reopen with no mount/symlink crossing and a dev/inode
+  check, never a second mountpoint-path lookup. Unreadable directories or
+  unavailable ioctls fail closed. The UUID is the filesystem FSID, not a
+  subvolume UUID; leaf confinement separately requires the root's subvolume ID.
+  Injected ioctl/statx tests are not physical Btrfs acceptance.
+- Non-Btrfs live UUID resolution uses `/dev/disk/by-uuid` readlink plus block-device stat.
   Observed ambiguities fail closed, but udev's single symlink per UUID can hide a
   cloned filesystem. This is not a complete block-device UUID inventory.
+  Btrfs fd probing likewise is not an inventory of unmounted filesystem clones;
+  distinct mounted subvolumes of one filesystem legitimately share its UUID.
 - Local tests establish temporary-fixture behavior and bounded proc metadata
   checks, not Dell acceptance. Actual Btrfs, mount mutation/restore events, and a
   successful allowed real-volume `OpenVerified` still need target-host evidence.

@@ -28,7 +28,15 @@ type Mount struct {
 // Multiple UUIDs per device and repeated UUIDs across devices are ambiguous.
 type UUIDs map[string][]string
 
+// Discover is metadata-only; it cannot approve Btrfs without opened-fd probes.
+// Production Linux callers use LoadSystem instead.
 func Discover(r io.Reader, uuids UUIDs) ([]Mount, error) {
+	return discover(r, uuids, nil)
+}
+
+// btrfs probes an opened, mount-bound directory rather than a backing block
+// device: Btrfs mountinfo device numbers are anonymous subvolume devices.
+func discover(r io.Reader, uuids UUIDs, btrfs func(Mount) (string, error)) ([]Mount, error) {
 	var mounts []Mount
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
@@ -69,20 +77,28 @@ func Discover(r io.Reader, uuids UUIDs) ([]Mount, error) {
 		m := &mounts[i]
 		values := uuids[m.Device]
 		switch {
-		case m.Filesystem == "btrfs":
-			m.Denied = "btrfs denied in S1: subvolume UUID binding and snapshot containment unassessed"
-		case !supported(m.Filesystem):
+		case m.Filesystem != "btrfs" && !supported(m.Filesystem):
 			m.Denied = "unsupported filesystem"
-		case len(values) != 1 || values[0] == "":
-			m.Denied = "missing or ambiguous filesystem UUID"
-		case len(uuidDevices[values[0]]) != 1:
-			m.Denied = "filesystem UUID appears on multiple devices"
 		case aliases[m.Device+"\x00"+m.Root] != 1:
 			m.Denied = "ambiguous bind or duplicate mount"
 		case mountpoints[m.Mountpoint] != 1:
 			m.Denied = "stacked mounts"
+		case m.Filesystem == "btrfs":
+			if btrfs == nil {
+				m.Denied = "btrfs requires opened mount UUID and subvolume probing"
+			} else if uuid, err := btrfs(*m); err != nil || uuid == "" {
+				m.Denied = "btrfs mount UUID or subvolume unavailable"
+			} else {
+				m.UUID = uuid
+			}
+		case len(values) != 1 || values[0] == "":
+			m.Denied = "missing or ambiguous filesystem UUID"
+		case len(uuidDevices[values[0]]) != 1:
+			m.Denied = "filesystem UUID appears on multiple devices"
 		default:
 			m.UUID = values[0]
+		}
+		if m.Denied == "" {
 			sum := sha256.Sum256([]byte(m.UUID + "\x00" + m.Root + "\x00" + m.Mountpoint))
 			m.Key = "linux-volume:" + hex.EncodeToString(sum[:])
 		}
@@ -137,12 +153,19 @@ func parse(line string) (Mount, error) {
 	if err != nil {
 		return Mount{}, err
 	}
-	for _, p := range []string{root, mountpoint} {
-		if !strings.HasPrefix(p, "/") || path.Clean(p) != p || strings.ContainsRune(p, 0) {
-			return Mount{}, bad
-		}
+	if !strings.HasPrefix(mountpoint, "/") || path.Clean(mountpoint) != mountpoint || strings.ContainsRune(mountpoint, 0) {
+		return Mount{}, bad
 	}
-	return Mount{ID: id, Device: fields[2], Root: root, Mountpoint: mountpoint, Filesystem: fields[sep+1]}, nil
+	// Namespace bind mounts use opaque roots such as net:[4026532559],
+	// not directory paths. Retain these unsupported rows for denial without
+	// rejecting the entire table. Never relax pathname validation for an
+	// authorizable filesystem (including Btrfs).
+	fs := fields[sep+1]
+	if root == "" || strings.ContainsRune(root, 0) ||
+		fs != "nsfs" && (!strings.HasPrefix(root, "/") || path.Clean(root) != root) {
+		return Mount{}, bad
+	}
+	return Mount{ID: id, Device: fields[2], Root: root, Mountpoint: mountpoint, Filesystem: fs}, nil
 }
 
 func unescape(s string) (string, error) {

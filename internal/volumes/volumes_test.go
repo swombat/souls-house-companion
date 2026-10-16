@@ -64,12 +64,35 @@ func TestMalformedMountinfo(t *testing.T) {
 		"1 1 8:x / / rw - ext4 /dev/sda1 rw",
 		`1 1 8:1 / /bad\000 rw - ext4 /dev/sda1 rw`,
 		"1 1 8:1 / /a/../b rw - ext4 /dev/sda1 rw",
+		"1 1 8:1 net:[4026532559] / rw - ext4 /dev/sda1 rw",
+		"1 1 0:30 net:[4026532559] / rw - btrfs /dev/sda1 rw",
+		"1 1 0:30 /a/../b / rw - btrfs /dev/sda1 rw",
+		"1 1 0:4 net:[4026532559] /a/../b rw - nsfs nsfs rw",
 		"1 1 8:1 / relative rw - ext4 /dev/sda1 rw",
 		"1 1 8:1 / / rw - ext4 /dev/sda1",
 		"1 1 8:1 / / rw - ext4 /dev/sda1 rw\n1 1 8:2 / /other rw - ext4 /dev/sda2 rw",
 	} {
 		if _, err := Discover(strings.NewReader(line), nil); err == nil {
 			t.Errorf("accepted %q", line)
+		}
+	}
+}
+
+func TestOpaqueNSFSRootsRetainedDeniedWithoutBlockingVolumes(t *testing.T) {
+	const table = `20 1 8:1 / /fixture/root rw - ext4 /dev/sda1 rw
+21 1 0:4 net:[4026532559] /run/netns/fixture-a rw - nsfs nsfs rw
+22 1 0:4 net:[4026531833] /run/netns/fixture-b rw - nsfs nsfs rw`
+	mounts, err := Discover(strings.NewReader(table), UUIDs{"8:1": {"fixture-uuid"}, "0:4": {"must-not-authorize"}})
+	if err != nil || len(mounts) != 3 {
+		t.Fatalf("normal namespace bind mounts blocked discovery: %+v %v", mounts, err)
+	}
+	if mounts[0].Key == "" || mounts[0].Denied != "" {
+		t.Fatalf("supported mount lost approval: %+v", mounts[0])
+	}
+	for i, root := range []string{"net:[4026532559]", "net:[4026531833]"} {
+		m := mounts[i+1]
+		if m.Root != root || m.Denied != "unsupported filesystem" || m.Key != "" || m.UUID != "" {
+			t.Fatalf("opaque namespace row not retained denied: %+v", m)
 		}
 	}
 }
