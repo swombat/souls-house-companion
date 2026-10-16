@@ -109,14 +109,15 @@ func TestBtrfsHostAcceptance(t *testing.T) {
 	if _, err := root.Read(ctx, path("symlink"), 0, 64); err == nil {
 		t.Fatal("symlink accepted")
 	}
-	// Creating an owned subvolume does not need root. Its deletion is explicit
-	// because RemoveAll cannot remove subvolume roots.
+	// Creating an owned subvolume does not need root. Remove its fixture
+	// contents before removing the empty subvolume; deleting a nonempty
+	// subvolume by ioctl may require user_subvol_rm_allowed.
 	nested := filepath.Join(dir, "nested")
 	if err := exec.Command("/usr/bin/btrfs", "subvolume", "create", nested).Run(); err != nil {
 		t.Fatal("cannot create actual nested-subvolume fixture", err)
 	}
 	defer func() {
-		if err := exec.Command("/usr/bin/btrfs", "subvolume", "delete", nested).Run(); err != nil {
+		if err := os.RemoveAll(nested); err != nil {
 			t.Error("nested-subvolume fixture cleanup failed", err)
 		}
 	}()

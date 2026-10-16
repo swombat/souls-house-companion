@@ -5,8 +5,6 @@ package volumes
 import (
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -100,14 +98,11 @@ func probeBtrfsMount(m Mount) (string, error) {
 }
 
 func btrfsMountMatches(m Mount, st *unix.Statx_t) bool {
-	parts := strings.Split(m.Device, ":")
-	if len(parts) != 2 {
-		return false
-	}
-	major, err1 := strconv.ParseUint(parts[0], 10, 32)
-	minor, err2 := strconv.ParseUint(parts[1], 10, 32)
-	return err1 == nil && err2 == nil &&
-		st.Mask&(unix.STATX_MNT_ID|unix.STATX_SUBVOL) == unix.STATX_MNT_ID|unix.STATX_SUBVOL &&
-		st.Mnt_id == m.ID && st.Dev_major == uint32(major) && st.Dev_minor == uint32(minor) &&
+	// Btrfs mountinfo reports the superblock's anonymous device, whereas
+	// stat/statx report the subvolume's anonymous device. These need not match.
+	// The mount ID plus mount-root attribute binds this fd to the row; FS_INFO
+	// then binds its filesystem, and callers pin its own device and subvolume.
+	return st.Mask&(unix.STATX_MNT_ID|unix.STATX_SUBVOL) == unix.STATX_MNT_ID|unix.STATX_SUBVOL &&
+		st.Mnt_id == m.ID &&
 		st.Attributes_mask&unix.STATX_ATTR_MOUNT_ROOT != 0 && st.Attributes&unix.STATX_ATTR_MOUNT_ROOT != 0
 }

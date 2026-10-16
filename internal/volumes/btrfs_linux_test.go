@@ -202,7 +202,7 @@ func TestBtrfsDiscoveryOpenedProbeAndFailures(t *testing.T) {
 func TestBtrfsDiscoveryMountBinding(t *testing.T) {
 	m := Mount{ID: 20, Device: "0:30"}
 	good := unix.Statx_t{
-		Mask: unix.STATX_MNT_ID | unix.STATX_SUBVOL, Mnt_id: 20, Dev_minor: 30,
+		Mask: unix.STATX_MNT_ID | unix.STATX_SUBVOL, Mnt_id: 20, Dev_minor: 36,
 		Attributes_mask: unix.STATX_ATTR_MOUNT_ROOT, Attributes: unix.STATX_ATTR_MOUNT_ROOT,
 	}
 	if !btrfsMountMatches(m, &good) {
@@ -210,8 +210,6 @@ func TestBtrfsDiscoveryMountBinding(t *testing.T) {
 	}
 	for _, change := range []func(*unix.Statx_t){
 		func(st *unix.Statx_t) { st.Mnt_id++ },
-		func(st *unix.Statx_t) { st.Dev_major++ },
-		func(st *unix.Statx_t) { st.Dev_minor++ },
 		func(st *unix.Statx_t) { st.Mask &^= unix.STATX_MNT_ID },
 		func(st *unix.Statx_t) { st.Mask &^= unix.STATX_SUBVOL },
 		func(st *unix.Statx_t) { st.Attributes_mask = 0 },

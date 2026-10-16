@@ -47,6 +47,12 @@ func OpenVerified(m volumes.Mount, protected []string, identities *Protected) (*
 		r.Close()
 		return nil, ErrMount
 	}
+	if m.Filesystem == "btrfs" {
+		// Mountinfo's superblock device is not the subvolume st_dev on Btrfs.
+		// Pin/check the actual retained root device, while mount ID/root attr
+		// bind the row and FS_INFO below independently binds the filesystem.
+		major, minor = uint64(unix.Major(r.rootID.dev)), uint64(unix.Minor(r.rootID.dev))
+	}
 	if err := r.verifyMount(m.ID, uint32(major), uint32(minor), true); err != nil {
 		r.Close()
 		return nil, err
