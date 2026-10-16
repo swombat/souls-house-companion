@@ -39,6 +39,7 @@ type Page struct {
 	Names     []string
 	Next      *ListCursor
 	Truncated bool
+	Skipped   int // raw entries omitted for mount/subvolume boundaries
 }
 
 // ListPage rescans/skips raw entries in batches with cancellation checks. It
@@ -79,6 +80,16 @@ func (r *Root) ListPage(ctx context.Context, path string, cursor *ListCursor, li
 	}
 	file := os.NewFile(uintptr(fd), "linuxfs-directory")
 	defer file.Close()
+	var opened unix.Stat_t
+	if err := unix.Fstat(fd, &opened); err != nil {
+		return Page{}, err
+	}
+	if opened.Dev != h.st.Dev || opened.Ino != h.st.Ino || opened.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return Page{}, ErrFileType
+	}
+	if err := r.checkLeaf(fd, &opened); err != nil {
+		return Page{}, err
+	}
 	for skipped := 0; skipped < offset; {
 		if err := ctx.Err(); err != nil {
 			return Page{}, err
@@ -107,6 +118,10 @@ func (r *Root) ListPage(ctx context.Context, path string, cursor *ListCursor, li
 			return Page{}, err
 		}
 		allowed, err := r.listedChild(h.fd, path, name)
+		if errors.Is(err, unix.EXDEV) || errors.Is(err, ErrSubvolume) {
+			out.Skipped++
+			continue
+		}
 		if err != nil {
 			return Page{}, err
 		}
@@ -142,7 +157,7 @@ func (r *Root) listedChild(parent int, path, name string) (bool, error) {
 		return false, nil
 	}
 	fd, err := openAt(parent, name, unix.O_PATH)
-	if errors.Is(err, unix.ENOENT) || errors.Is(err, ErrSymlink) || errors.Is(err, unix.EXDEV) {
+	if errors.Is(err, unix.ENOENT) || errors.Is(err, ErrSymlink) {
 		return false, nil
 	}
 	if err != nil {
@@ -153,7 +168,7 @@ func (r *Root) listedChild(parent int, path, name string) (bool, error) {
 	if err := unix.Fstat(fd, &st); err != nil {
 		return false, err
 	}
-	err = r.checkInode(fd, &st)
+	err = r.checkLeaf(fd, &st)
 	if errors.Is(err, ErrProtected) || errors.Is(err, ErrSymlink) {
 		return false, nil
 	}

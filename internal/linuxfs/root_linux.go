@@ -54,6 +54,7 @@ var (
 	ErrProcfs      = errors.New("linuxfs: trusted procfs unavailable")
 	ErrContainment = errors.New("linuxfs: ancestry cannot be safely established")
 	ErrMount       = errors.New("linuxfs: mount binding mismatch or unavailable")
+	ErrSubvolume   = errors.New("linuxfs: subvolume boundary unavailable or crossed")
 )
 
 // Root is safe for concurrent use. Close waits for in-flight operations.
@@ -69,6 +70,8 @@ type Root struct {
 	rootID     inode
 	snapshot   *volumes.Snapshot
 	invalid    atomic.Bool
+	subvolume  *uint64
+	subvolStat func(int, *unix.Statx_t) error // immutable after opening
 }
 
 // Open opens the root directory once, without following its final component.
@@ -136,8 +139,21 @@ func openRoot(rootPath string, protected []string, identities *Protected, procPr
 		unix.Close(fd)
 		return nil, ErrProcfs
 	}
-	r := &Root{fd: fd, procFD: procFD, ready: true, protected: denied, identities: make(map[inode]bool)}
+	r := &Root{fd: fd, procFD: procFD, ready: true, protected: denied, identities: make(map[inode]bool), subvolStat: statSubvolume}
 	r.rootID = identity(&st)
+	var rootFS unix.Statfs_t
+	if err := unix.Fstatfs(fd, &rootFS); err != nil {
+		r.Close()
+		return nil, err
+	}
+	if rootFS.Type == unix.BTRFS_SUPER_MAGIC {
+		var sx unix.Statx_t
+		if err := r.subvolStat(fd, &sx); err != nil || sx.Mask&unix.STATX_SUBVOL == 0 {
+			r.Close()
+			return nil, ErrSubvolume
+		}
+		r.subvolume = &sx.Subvol
+	}
 	if err := r.copyProtected(identities); err != nil {
 		r.Close()
 		return nil, err
@@ -306,6 +322,9 @@ func (r *Root) Read(ctx context.Context, path string, offset int64, limit int) (
 	if opened.Dev != st.Dev || opened.Ino != st.Ino || opened.Mode&unix.S_IFMT != unix.S_IFREG {
 		return nil, ErrFileType
 	}
+	if err := r.checkLeaf(fd, &opened); err != nil {
+		return nil, err
+	}
 	st = opened
 	// Avoid allocating the full cap for a small file; concurrent growth is not
 	// promised to appear in this request.
@@ -350,11 +369,12 @@ func (r *Root) Read(ctx context.Context, path string, offset int64, limit int) (
 type Listing struct {
 	Names     []string
 	Truncated bool
+	Skipped   int
 }
 
 // List reads at most limit+1 names and checks child O_PATH inode identities.
 // Protected entries and symlinks are omitted. No recursive listing is offered.
 func (r *Root) List(ctx context.Context, path string, limit int) (Listing, error) {
 	page, err := r.ListPage(ctx, path, nil, limit)
-	return Listing{Names: page.Names, Truncated: page.Truncated}, err
+	return Listing{Names: page.Names, Truncated: page.Truncated, Skipped: page.Skipped}, err
 }

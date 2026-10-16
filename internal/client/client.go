@@ -24,6 +24,8 @@ const maxJSON = 128 << 10
 
 // No remote error text, headers or credential-bearing state reaches logs.
 var ErrTransport = errors.New("companion transport refused")
+var ErrPaused = errors.New("companion paused")
+var ErrAuthority = errors.New("companion authority refused")
 
 type Request struct {
 	Type       string          `json:"type"`
@@ -50,6 +52,8 @@ type Client struct {
 	Save func(State) error
 	// BeforeDelivery checks local pause/mount/policy again after I/O.
 	BeforeDelivery func() error
+	workerOnce     sync.Once
+	workerSlots    chan struct{}
 }
 
 func New(handler Handler) *Client {
@@ -98,6 +102,12 @@ func (c *Client) json(ctx context.Context, base, path, credential string, input,
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		if res.StatusCode == http.StatusLocked {
+			return ErrPaused
+		}
+		if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+			return ErrAuthority
+		}
 		return fmt.Errorf("%w (HTTP %d)", ErrTransport, res.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(res.Body, maxJSON+1))
@@ -191,9 +201,30 @@ func (c *Client) RunOnce(ctx context.Context, state *State) error {
 		return ErrTransport
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	var workers sync.WaitGroup
-	defer func() { cancel(); workers.Wait() }()
-	slots := make(chan struct{}, 4)
+	defer cancel()
+	// Slots belong to the client, not the connection. An uninterruptible
+	// filesystem syscall may outlive cancellation, but reconnect cannot create
+	// an unbounded collection of abandoned workers.
+	c.workerOnce.Do(func() { c.workerSlots = make(chan struct{}, 4) })
+	connectionState := *state
+	beforeDelivery := c.BeforeDelivery
+	if beforeDelivery != nil {
+		go func() {
+			ticker := time.NewTicker(250 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if beforeDelivery() != nil {
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+	}
 	seen := make(map[string]bool)
 	var epoch string
 	for {
@@ -209,7 +240,16 @@ func (c *Client) RunOnce(ctx context.Context, state *State) error {
 		if json.Unmarshal(raw, &frame) != nil {
 			return ErrTransport
 		}
-		if frame.Type == "disconnect" || frame.Type == "reject_subscription" {
+		switch frame.Type {
+		case "welcome", "ping", "confirm_subscription":
+			// Action Cable control frames are not application payloads. In
+			// particular ping.message is a Unix timestamp, not a Request.
+			continue
+		case "disconnect", "reject_subscription":
+			return ErrTransport
+		case "":
+			// Channel transmissions have no top-level type.
+		default:
 			return ErrTransport
 		}
 		if len(frame.Message) == 0 {
@@ -240,23 +280,23 @@ func (c *Client) RunOnce(ctx context.Context, state *State) error {
 			return ErrTransport
 		}
 		select {
-		case slots <- struct{}{}:
+		case c.workerSlots <- struct{}{}:
 		default:
 			return ErrTransport
 		}
-		workers.Go(func() {
-			defer func() { <-slots }()
+		go func() {
+			defer func() { <-c.workerSlots }()
 			opctx, stop := context.WithDeadline(ctx, request.Deadline)
 			defer stop()
-			data, format, handlerErr := c.Handler.Handle(opctx, request, state.Ceiling)
-			if opctx.Err() != nil || (c.BeforeDelivery != nil && c.BeforeDelivery() != nil) {
+			data, format, handlerErr := c.Handler.Handle(opctx, request, connectionState.Ceiling)
+			if opctx.Err() != nil || (beforeDelivery != nil && beforeDelivery() != nil) {
 				return
 			}
 			if len(data) > 8<<20 || (format != "binary" && format != "json") {
 				data, format, handlerErr = nil, "json", errors.New("invalid result")
 			}
-			c.result(opctx, *state, request, data, format, handlerErr)
-		})
+			c.result(opctx, connectionState, request, data, format, handlerErr)
+		}()
 	}
 }
 

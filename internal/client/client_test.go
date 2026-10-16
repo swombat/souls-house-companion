@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,12 +12,84 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/swombat/souls-house-companion/internal/policy"
 )
+
+func TestCancellationDoesNotWaitForBlockedWorkersOrGrowThemOnReconnect(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	var started atomic.Int32
+	var denied atomic.Bool
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/companion/session" {
+			json.NewEncoder(w).Encode(map[string]any{"device_id": "device", "device_credential": "shcd_next",
+				"cable_ticket": "synthetic-ticket", "revision": 1, "policy": policy.Policy{}})
+			return
+		}
+		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"actioncable-v1-json"}})
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		if _, _, err := ws.Read(r.Context()); err != nil {
+			return
+		}
+		send := func(req Request) {
+			raw, _ := json.Marshal(map[string]any{"message": req})
+			_ = ws.Write(r.Context(), websocket.MessageText, raw)
+		}
+		send(Request{Type: "ready", DeviceID: "device", Epoch: "epoch"})
+		for i := range 4 {
+			send(Request{Type: "request", ID: fmt.Sprint(i), DeviceID: "device", Epoch: "epoch",
+				Deadline: time.Now().Add(20 * time.Second)})
+		}
+		_, _, _ = ws.Read(r.Context())
+	}))
+	defer server.Close()
+	c := New(handlerFunc(func(context.Context, Request, policy.Policy) ([]byte, string, error) {
+		started.Add(1)
+		<-release // Deliberately models an uninterruptible kernel call.
+		return []byte("must not deliver"), "binary", nil
+	}))
+	tlsClient(c, server)
+	c.Save = func(State) error { return nil }
+	c.BeforeDelivery = func() error {
+		if denied.Load() {
+			return errors.New("mount or local pause changed")
+		}
+		return nil
+	}
+	state := State{URL: server.URL, DeviceID: "device", Credential: "shcd_old"}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.RunOnce(ctx, &state) }()
+	deadline := time.Now().Add(3 * time.Second)
+	for started.Load() < 4 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if started.Load() != 4 {
+		t.Fatal("fixture did not start four blocked workers")
+	}
+	denied.Store(true) // Independent watcher must end socket, not await I/O.
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("authority change waited for blocked filesystem workers")
+	}
+	denied.Store(false)
+	if err := c.RunOnce(ctx, &state); err == nil {
+		t.Fatal("reconnect with exhausted worker slots accepted")
+	}
+	if started.Load() != 4 {
+		t.Fatal("reconnect grew abandoned worker pool")
+	}
+}
 
 type handlerFunc func(context.Context, Request, policy.Policy) ([]byte, string, error)
 
@@ -102,6 +175,25 @@ func TestRedirectNeverReceivesCredential(t *testing.T) {
 	}
 }
 
+func TestSessionAuthorityFailuresAreTypedWithoutRemoteErrorText(t *testing.T) {
+	for status, want := range map[int]error{401: ErrAuthority, 403: ErrAuthority, 423: ErrPaused} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte("synthetic-secret-must-not-reach-logs"))
+			}))
+			defer server.Close()
+			c := New(nil)
+			tlsClient(c, server)
+			var output any
+			err := c.json(context.Background(), server.URL, "/session", "synthetic", map[string]string{}, &output)
+			if !errors.Is(err, want) || strings.Contains(err.Error(), "synthetic-secret") {
+				t.Fatalf("unsafe/untyped refusal: %v", err)
+			}
+		})
+	}
+}
+
 func TestSocketFixtureDeliveryAndSuppression(t *testing.T) {
 	for _, suppress := range []bool{false, true} {
 		t.Run(map[bool]string{false: "deliver", true: "suppress"}[suppress], func(t *testing.T) {
@@ -133,6 +225,15 @@ func TestSocketFixtureDeliveryAndSuppression(t *testing.T) {
 					write := func(v any) {
 						b, _ := json.Marshal(map[string]any{"message": v})
 						if err := ws.Write(ctx, websocket.MessageText, b); err != nil {
+							t.Error(err)
+						}
+					}
+					for _, control := range []string{
+						`{"type":"welcome"}`,
+						`{"type":"ping","message":1792150000}`,
+						`{"type":"confirm_subscription","identifier":"CompanionChannel"}`,
+					} {
+						if err := ws.Write(ctx, websocket.MessageText, []byte(control)); err != nil {
 							t.Error(err)
 						}
 					}

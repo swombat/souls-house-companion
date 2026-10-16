@@ -71,7 +71,20 @@ func run(args []string) error {
 	*dir = absolute
 	unit := filepath.Join(home, ".config/systemd/user/souls-house-companion.service")
 	if args[0] == "pause" {
-		// Cancellation begins before state mutation. No Close wait precedes it.
+		// Independent of the service-held state lock and systemd availability.
+		// Presence alone is deny; a failed stop must never leave delivery live.
+		if _, err := client.Load(*dir); err != nil {
+			return err
+		}
+		marker, err := os.OpenFile(filepath.Join(*dir, "paused"), os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
+		if err != nil {
+			return err
+		}
+		syncErr := marker.Sync()
+		marker.Close()
+		if syncErr != nil {
+			return syncErr
+		}
 		if err := systemctl("stop", "souls-house-companion.service"); err != nil {
 			return err
 		}
@@ -168,6 +181,9 @@ func run(args []string) error {
 		}
 		lock.Close()
 		if args[0] == "resume" {
+			if err := os.Remove(filepath.Join(*dir, "paused")); err != nil && !os.IsNotExist(err) {
+				return err
+			}
 			return systemctl("start", "souls-house-companion.service")
 		}
 		return nil
@@ -245,6 +261,9 @@ func serve(dir, unit string) error {
 	c := client.New(handler)
 	c.Save = func(s client.State) error { return client.Save(dir, s) }
 	for ctx.Err() == nil {
+		if _, err := os.Lstat(filepath.Join(dir, "paused")); !os.IsNotExist(err) {
+			return errors.New("locally paused")
+		}
 		// Refuse unsupported mounts/protection before opening any socket.
 		mounts, snap, err := volumes.LoadSystem()
 		if err != nil {
@@ -269,6 +288,9 @@ func serve(dir, unit string) error {
 		}
 		protected.Close()
 		c.BeforeDelivery = func() error {
+			if _, err := os.Lstat(filepath.Join(dir, "paused")); !os.IsNotExist(err) {
+				return errors.New("locally paused")
+			}
 			if err := snap.Validate(); err != nil {
 				return err
 			}
@@ -278,12 +300,16 @@ func serve(dir, unit string) error {
 			}
 			return nil
 		}
-		_ = c.RunOnce(ctx, &state)
+		runErr := c.RunOnce(ctx, &state)
 		snap.Close()
+		delay := 10 * time.Second
+		if errors.Is(runErr, client.ErrPaused) || errors.Is(runErr, client.ErrAuthority) {
+			delay = 5 * time.Minute
+		}
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(10 * time.Second):
+		case <-time.After(delay):
 		}
 	}
 	return nil

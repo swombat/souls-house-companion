@@ -216,6 +216,13 @@ func TestUnsupportedStatxFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
+	var expected unix.Statx_t
+	if err := unix.Statx(root.fd, "", unix.AT_EMPTY_PATH|unix.AT_SYMLINK_NOFOLLOW, unix.STATX_MNT_ID, &expected); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.VerifyMount(expected.Mnt_id, expected.Dev_major, expected.Dev_minor); err != nil {
+		t.Fatalf("actual matching mount identity rejected before statx block: %v", err)
+	}
 	runtime.LockOSThread()
 	filter := []unix.SockFilter{
 		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0},
@@ -230,7 +237,7 @@ func TestUnsupportedStatxFailsClosed(t *testing.T) {
 	if err := unix.Prctl(unix.PR_SET_SECCOMP, unix.SECCOMP_MODE_FILTER, uintptr(unsafe.Pointer(&program)), 0, 0); err != nil {
 		os.Exit(77)
 	}
-	if err := root.VerifyMount(1, 0, 0); !errors.Is(err, ErrMount) {
+	if err := root.VerifyMount(expected.Mnt_id, expected.Dev_major, expected.Dev_minor); !errors.Is(err, ErrMount) {
 		t.Fatalf("unsupported statx = %v", err)
 	}
 	assertOperationsError(t, root, ".", volumes.ErrMountChanged)

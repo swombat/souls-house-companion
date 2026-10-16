@@ -10,7 +10,9 @@ Production integration:
    state before capture; ancestors of these trusted paths must also be trusted.
 3. `OpenVerified(mount, relativeProtectedPaths, capture) (*Root, error)` rediscovers
    the exact allowed row, binds the fd with `statx(AT_EMPTY_PATH, STATX_MNT_ID)` and
-   device major/minor, and owns duplicated identity pins and its own snapshot.
+   device major/minor, and requires the fd's `STATX_ATTR_MOUNT_ROOT` support bit
+   and attribute. A same-mount ancestor/subdirectory cannot substitute for the
+   mount root. It owns duplicated identity pins and its own snapshot.
    The caller may then close the capture and discovery snapshot.
 4. `Read`, `Stat`, `List` check mount snapshots before and after work. Call
    `root.Validate()` immediately before delivery as well. Every public root
@@ -29,12 +31,19 @@ retained for type-checked inode reopen. Protected identities are checked on
 O_PATH descriptors before I/O/metadata. Directory ancestry is walked through
 retained actual parents, so a renamed protected directory still denies nested
 descendants. Walks beyond 256 parents, escape, and uncertain lookups fail closed.
-Listings omit protected aliases and symlinks.
+Listings prove the listed parent's ancestry and inspect child inode identities
+without searching each child directory. An inaccessible child does not poison
+its parent listing, but opening/traversing it remains denied. Directory proc
+reopens are dev/inode/type-checked before reading names.
 
 `ListPage(ctx, path, cursor, limit) (Page, error)` supports directory continuation
 beyond the first 1024 raw names. Start with nil cursor; retain `Page.Next` (opaque
 `*ListCursor`) in the dispatcher's server-side search state. `Next == nil` means
-complete; filtered pages can be empty with nonnil `Next`. Reopened roots of the
+exhausted; filtered pages can be empty with nonnil `Next`. `Page.Skipped` (also
+`Listing.Skipped`) counts raw entries omitted for mount/subvolume boundaries.
+The service must accumulate it and never call a search complete when nonzero,
+even when `Next == nil`. Protected names/symlinks remain excluded by policy
+rather than counted as searched scope. Reopened roots of the
 same identity can continue. Directory inode/mtime/ctime/path changes refuse the
 continuation with `ErrDirectoryChanged`. Rescans check cancellation every 256
 skipped names and stop at one million raw offsets with `ErrBounds`, **not** a
@@ -53,8 +62,15 @@ rescan pagination, not an atomic filesystem snapshot.
   captured too. Existing identity pins prevent inode reuse; replacing a captured
   file requires recapturing its new inode. If that cannot be supervised, do not
   grant access to a root where aliases could disclose it.
-- Btrfs is explicitly denied in S1, pending real subvolume/snapshot assessment.
-  `NO_XDEV` is **not** claimed to contain Btrfs subvolumes.
+- Every looked-up inode, walked ancestor, and readable reopen must match the
+  root's actual `st_dev`; `NO_XDEV` alone is not a subvolume boundary.
+  Fixture `Open` on Btrfs additionally requires `STATX_SUBVOL` at opening and on
+  every such handle, with an equal subvolume ID. Missing support fails closed.
+  Btrfs production discovery/`OpenVerified` remain explicitly denied: the
+  current by-uuid resolver maps backing block devices, whereas Btrfs mountinfo
+  uses anonymous subvolume device IDs. UUID binding and real target-host
+  subvolume/snapshot tests remain unassessed; injected statx tests are not
+  physical Btrfs acceptance.
 - Live UUID resolution uses `/dev/disk/by-uuid` readlink plus block-device stat.
   Observed ambiguities fail closed, but udev's single symlink per UUID can hide a
   cloned filesystem. This is not a complete block-device UUID inventory.

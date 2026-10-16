@@ -387,3 +387,37 @@ func TestScanBoundsAndPreCancellation(t *testing.T) {
 		t.Fatalf("pre-canceled scan = %v", err)
 	}
 }
+
+func TestCursorBudgetIsPerResidentAndContinuationKeepsReservation(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a", "b", "c", "d"} {
+		scanFixtureFile(t, filepath.Join(dir, name))
+	}
+	root := scanFixtureRoot(t, dir)
+	h := &Handler{}
+	args := arguments{Volume: "fixture-volume", Path: ".", Limit: 1}
+	var first scanResult
+	for i := range 128 {
+		page, err := h.scan(context.Background(), root, scanFixtureRequest(), scanFixturePolicy(), args, false)
+		if err != nil || page.Cursor == "" {
+			t.Fatalf("reservation %d: %+v %v", i, page, err)
+		}
+		if i == 0 {
+			first = page
+		}
+	}
+	if _, err := h.scan(context.Background(), root, scanFixtureRequest(), scanFixturePolicy(), args, false); err == nil {
+		t.Fatal("resident exceeded cursor budget")
+	}
+	args.Cursor = first.Cursor
+	next, err := h.scan(context.Background(), root, scanFixtureRequest(), scanFixturePolicy(), args, false)
+	if err != nil || next.Cursor == "" || len(next.Paths) != 1 || next.Paths[0] == first.Paths[0] {
+		t.Fatalf("full budget lost continuation or page: %+v %v", next, err)
+	}
+	request := scanFixtureRequest()
+	request.ResidentID = "independent-actor"
+	args.Cursor = ""
+	if _, err := h.scan(context.Background(), root, request, scanFixturePolicy(), args, false); err != nil {
+		t.Fatalf("one resident exhausted another's cursor budget: %v", err)
+	}
+}

@@ -70,7 +70,7 @@ func Discover(r io.Reader, uuids UUIDs) ([]Mount, error) {
 		values := uuids[m.Device]
 		switch {
 		case m.Filesystem == "btrfs":
-			m.Denied = "btrfs denied in S1: subvolume and snapshot containment unassessed"
+			m.Denied = "btrfs denied in S1: subvolume UUID binding and snapshot containment unassessed"
 		case !supported(m.Filesystem):
 			m.Denied = "unsupported filesystem"
 		case len(values) != 1 || values[0] == "":

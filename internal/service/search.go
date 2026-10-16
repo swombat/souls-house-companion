@@ -21,10 +21,11 @@ type directory struct {
 	Cursor *linuxfs.ListCursor
 }
 type scan struct {
-	Binding [32]byte
-	Expires time.Time
-	Queue   []directory
-	Skipped int
+	Resident string
+	Binding  [32]byte
+	Expires  time.Time
+	Queue    []directory
+	Skipped  int
 }
 type scanResult struct {
 	Paths    []string `json:"paths"`
@@ -47,23 +48,46 @@ func (h *Handler) scan(ctx context.Context, root *linuxfs.Root, request client.R
 	bound, _ := json.Marshal([]any{request.ResidentID, request.Revision, request.Policy, ceiling, args.Volume, args.Path, args.Pattern, recursive})
 	binding := sha256.Sum256(bound)
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.cursors == nil {
 		h.cursors = make(map[string]*scan)
+		h.cursorCounts = make(map[string]int)
 	}
 	for key, s := range h.cursors {
 		if s.Expires.Before(time.Now()) {
 			delete(h.cursors, key)
+			h.cursorCounts[s.Resident]--
 		}
 	}
-	s := &scan{Binding: binding, Queue: []directory{{Path: args.Path}}, Expires: time.Now().Add(5 * time.Minute)}
+	s := &scan{Resident: request.ResidentID, Binding: binding, Queue: []directory{{Path: args.Path}}, Expires: time.Now().Add(5 * time.Minute)}
 	if args.Cursor != "" {
 		s = h.cursors[args.Cursor]
-		delete(h.cursors, args.Cursor)
 		if s == nil || s.Binding != binding {
+			if s != nil {
+				delete(h.cursors, args.Cursor)
+				h.cursorCounts[s.Resident]--
+			}
+			h.mu.Unlock()
 			return out, ErrDenied
 		}
+		delete(h.cursors, args.Cursor)
+	} else {
+		// Reserve before advancing any filesystem cursor, including in-flight
+		// work. A full budget cannot consume a continuation or partial page.
+		if h.cursorCounts[request.ResidentID] >= 128 || len(h.cursors) >= 4096 {
+			h.mu.Unlock()
+			return out, errors.New("cursor budget exhausted")
+		}
+		h.cursorCounts[request.ResidentID]++
 	}
+	h.mu.Unlock()
+	retained := false
+	defer func() {
+		if !retained {
+			h.mu.Lock()
+			h.cursorCounts[s.Resident]--
+			h.mu.Unlock()
+		}
+	}()
 	start := time.Now()
 	encodedBytes := 0
 	for work := 0; len(s.Queue) != 0 && len(out.Paths) < args.Limit && encodedBytes < 32<<10 && work < 2000 && time.Since(start) < 5*time.Second; {
@@ -87,6 +111,7 @@ func (h *Handler) scan(ctx context.Context, root *linuxfs.Root, request client.R
 			continue
 		}
 		work += len(page.Names) + 1
+		s.Skipped += page.Skipped
 		if page.Next == nil {
 			s.Queue = s.Queue[1:]
 		} else {
@@ -129,15 +154,15 @@ func (h *Handler) scan(ctx context.Context, root *linuxfs.Root, request client.R
 	out.Skipped = s.Skipped
 	out.Complete = len(s.Queue) == 0 && s.Skipped == 0
 	if len(s.Queue) != 0 {
-		if len(h.cursors) >= 128 {
-			return out, errors.New("cursor budget exhausted")
-		}
 		var id [24]byte
 		if _, err := rand.Read(id[:]); err != nil {
 			return out, err
 		}
 		out.Cursor = hex.EncodeToString(id[:])
+		h.mu.Lock()
 		h.cursors[out.Cursor] = s
+		h.mu.Unlock()
+		retained = true
 	}
 	return out, nil
 }

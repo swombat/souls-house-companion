@@ -47,7 +47,7 @@ func OpenVerified(m volumes.Mount, protected []string, identities *Protected) (*
 		r.Close()
 		return nil, ErrMount
 	}
-	if err := r.VerifyMount(m.ID, uint32(major), uint32(minor)); err != nil {
+	if err := r.verifyMount(m.ID, uint32(major), uint32(minor), true); err != nil {
 		r.Close()
 		return nil, err
 	}
@@ -57,6 +57,10 @@ func OpenVerified(m volumes.Mount, protected []string, identities *Protected) (*
 // VerifyMount does not establish discovery approval; use OpenVerified for that.
 // Unsupported/missing STATX_MNT_ID fails closed. A mismatch invalidates the root.
 func (r *Root) VerifyMount(id uint64, major, minor uint32) error {
+	return r.verifyMount(id, major, minor, false)
+}
+
+func (r *Root) verifyMount(id uint64, major, minor uint32, requireRoot bool) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if !r.ready || r.fd < 0 {
@@ -65,12 +69,18 @@ func (r *Root) VerifyMount(id uint64, major, minor uint32) error {
 	var st unix.Statx_t
 	err := unix.Statx(r.fd, "", unix.AT_EMPTY_PATH|unix.AT_SYMLINK_NOFOLLOW,
 		unix.STATX_MNT_ID, &st)
-	if err != nil || st.Mask&unix.STATX_MNT_ID == 0 ||
-		st.Mnt_id != id || st.Dev_major != major || st.Dev_minor != minor {
+	if err != nil || !mountMatches(&st, id, major, minor, requireRoot) {
 		r.invalid.Store(true)
 		return fmt.Errorf("%w: statx mount identity unavailable or different", ErrMount)
 	}
 	return r.checkMount()
+}
+
+func mountMatches(st *unix.Statx_t, id uint64, major, minor uint32, requireRoot bool) bool {
+	return st.Mask&unix.STATX_MNT_ID != 0 &&
+		st.Mnt_id == id && st.Dev_major == major && st.Dev_minor == minor &&
+		(!requireRoot || st.Attributes_mask&unix.STATX_ATTR_MOUNT_ROOT != 0 &&
+			st.Attributes&unix.STATX_ATTR_MOUNT_ROOT != 0)
 }
 
 // Validate rechecks current mount authorization immediately before delivery.

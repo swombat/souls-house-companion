@@ -116,8 +116,8 @@ func (r *Root) checkDirectory(fd int) error {
 			return err
 		}
 		id := identity(&st)
-		if r.identities[id] {
-			return ErrProtected
+		if err := r.checkLeaf(current, &st); err != nil {
+			return err
 		}
 		if id == r.rootID {
 			return nil
@@ -144,12 +144,38 @@ func (r *Root) checkDirectory(fd int) error {
 	return ErrContainment
 }
 
-func (r *Root) checkInode(fd int, st *unix.Stat_t) error {
+// checkLeaf inspects an O_PATH inode without traversing a directory child.
+// A listing already proves its parent ancestry; traversing the child's ".."
+// would incorrectly require search permission just to return its public name.
+func (r *Root) checkLeaf(fd int, st *unix.Stat_t) error {
+	// Btrfs can expose a nested subvolume in the same vfsmount. NO_XDEV alone
+	// is not sufficient: always require the root's actual st_dev as well.
+	if uint64(st.Dev) != r.rootID.dev {
+		return unix.EXDEV
+	}
 	if r.identities[identity(st)] {
 		return ErrProtected
 	}
 	if st.Mode&unix.S_IFMT == unix.S_IFLNK {
 		return ErrSymlink
+	}
+	if r.subvolume != nil {
+		var sx unix.Statx_t
+		if err := r.subvolStat(fd, &sx); err != nil || sx.Mask&unix.STATX_SUBVOL == 0 ||
+			sx.Subvol != *r.subvolume {
+			return ErrSubvolume
+		}
+	}
+	return nil
+}
+
+func statSubvolume(fd int, st *unix.Statx_t) error {
+	return unix.Statx(fd, "", unix.AT_EMPTY_PATH|unix.AT_SYMLINK_NOFOLLOW, unix.STATX_SUBVOL, st)
+}
+
+func (r *Root) checkInode(fd int, st *unix.Stat_t) error {
+	if err := r.checkLeaf(fd, st); err != nil {
+		return err
 	}
 	if st.Mode&unix.S_IFMT == unix.S_IFDIR {
 		return r.checkDirectory(fd)

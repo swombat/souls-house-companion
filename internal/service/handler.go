@@ -19,6 +19,7 @@ type Handler struct {
 	ProtectedPaths []string
 	mu             sync.Mutex
 	cursors        map[string]*scan
+	cursorCounts   map[string]int
 }
 
 type arguments struct {
