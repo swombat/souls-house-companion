@@ -324,7 +324,13 @@ func inspectUserUnit(ctx context.Context) (userUnitState, error) {
 }
 
 func (s userUnitState) absent() bool {
-	return s.load == "not-found" && s.active == "inactive"
+	return s.load == "not-found" && s.quiescent()
+}
+
+func (s userUnitState) quiescent() bool {
+	// systemd preserves failed after a successful stop; failed is an
+	// inactive state, not evidence of a still-running service.
+	return s.active == "inactive" || s.active == "failed"
 }
 
 func stopUserUnit(ctx context.Context) error {
@@ -344,7 +350,7 @@ func stopUserUnit(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if state.active != "inactive" || (state.load != "loaded" && !state.absent()) {
+	if !state.quiescent() || (state.load != "loaded" && !state.absent()) {
 		return errors.New("unit not confirmed inactive")
 	}
 	return nil

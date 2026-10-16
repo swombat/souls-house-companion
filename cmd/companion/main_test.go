@@ -304,6 +304,8 @@ func TestStopUserUnitRequiresQuiescenceAndControl(t *testing.T) {
 		wantStop             bool
 	}{
 		{"missing-inactive", "LoadState=not-found\nActiveState=inactive\n", "", 5, true, false},
+		{"missing-failed", "LoadState=not-found\nActiveState=failed\n", "", 5, true, false},
+		{"loaded-failed", "LoadState=loaded\nActiveState=failed\n", "LoadState=loaded\nActiveState=failed\n", 0, true, true},
 		{"loaded-inactive", "LoadState=loaded\nActiveState=inactive\n", "LoadState=loaded\nActiveState=inactive\n", 0, true, true},
 		{"active-stopped", "LoadState=loaded\nActiveState=active\n", "LoadState=loaded\nActiveState=inactive\n", 0, true, true},
 		{"missing-but-active", "LoadState=not-found\nActiveState=active\n", "", 5, false, true},
@@ -311,7 +313,7 @@ func TestStopUserUnitRequiresQuiescenceAndControl(t *testing.T) {
 		{"stop-exit5-not-proof-of-absence", "LoadState=loaded\nActiveState=active\n", "", 5, false, true},
 		{"stop-success-but-active", "LoadState=loaded\nActiveState=active\n", "LoadState=loaded\nActiveState=active\n", 0, false, true},
 		{"stop-success-but-deactivating", "LoadState=loaded\nActiveState=active\n", "LoadState=loaded\nActiveState=deactivating\n", 0, false, true},
-		{"stop-success-but-failed", "LoadState=loaded\nActiveState=active\n", "LoadState=loaded\nActiveState=failed\n", 0, false, true},
+		{"stop-success-but-failed", "LoadState=loaded\nActiveState=active\n", "LoadState=loaded\nActiveState=failed\n", 0, true, true},
 		{"stop-success-but-unknown-load", "LoadState=loaded\nActiveState=active\n", "LoadState=unknown\nActiveState=inactive\n", 0, false, true},
 		{"missing-active-property", "LoadState=not-found\n", "", 0, false, false},
 		{"missing-load-property", "ActiveState=inactive\n", "", 0, false, false},
@@ -443,6 +445,7 @@ func TestDisableUserUnitDoesNotIgnoreFailures(t *testing.T) {
 		wantDisable, wantOK bool
 	}{
 		{"absent-inactive", "LoadState=not-found\nActiveState=inactive\n", false, 0, false, true},
+		{"absent-failed", "LoadState=not-found\nActiveState=failed\n", false, 0, false, true},
 		{"file-still-present", "LoadState=not-found\nActiveState=inactive\n", true, 0, true, false},
 		{"missing-file-but-loaded", "LoadState=loaded\nActiveState=inactive\n", false, 0, true, false},
 		{"missing-file-but-active", "LoadState=not-found\nActiveState=active\n", false, 0, true, false},
