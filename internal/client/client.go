@@ -27,6 +27,14 @@ var ErrTransport = errors.New("companion transport refused")
 var ErrPaused = errors.New("companion paused")
 var ErrAuthority = errors.New("companion authority refused")
 
+// ErrExecuteShutdown means an execute worker exceeded the shutdown grace.
+// Returning from RunOnce is not proof that its transient unit is quiescent.
+var ErrExecuteShutdown = errors.New("companion execute shutdown incomplete")
+
+// The runner allows 10s for independent cleanup and up to 3s to reap its
+// launcher afterward. Leave headroom without extending the grace per worker.
+const executeShutdownGrace = 15 * time.Second
+
 type Request struct {
 	Type          string          `json:"type"`
 	ID            string          `json:"request_id"`
@@ -159,7 +167,13 @@ type session struct {
 
 // RunOnce opens one connection. Its owner may reconnect, but requests and
 // results are never replayed. Cancellation suppresses delivery before Close.
+// Before returning it gives execute workers a bounded grace for independent
+// cleanup. Filesystem workers may remain abandoned in the client's slot pool.
 func (c *Client) RunOnce(ctx context.Context, state *State) error {
+	return c.runOnce(ctx, state, executeShutdownGrace)
+}
+
+func (c *Client) runOnce(ctx context.Context, state *State, shutdownGrace time.Duration) (runErr error) {
 	if state.Uninstalled {
 		return ErrAuthority
 	}
@@ -211,7 +225,14 @@ func (c *Client) RunOnce(ctx context.Context, state *State) error {
 		return ErrTransport
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	var executions executeWorkers
+	defer func() {
+		cancel() // Revoke delivery and start independent runner cleanup first.
+		conn.CloseNow()
+		if !executions.wait(shutdownGrace) {
+			runErr = errors.Join(runErr, ErrExecuteShutdown)
+		}
+	}()
 	// Slots belong to the client, not the connection. An uninterruptible
 	// filesystem syscall may outlive cancellation, but reconnect cannot create
 	// an unbounded collection of abandoned workers.
@@ -300,7 +321,14 @@ func (c *Client) RunOnce(ctx context.Context, state *State) error {
 			stop()
 			continue
 		}
+		finishExecute := func() {}
+		if request.Operation == "execute" {
+			// Register before spawning, so cancellation cannot miss a worker
+			// that has not yet reached Handle (including input fetches).
+			finishExecute = executions.start()
+		}
 		go func() {
+			defer finishExecute()
 			defer func() { <-c.workerSlots }()
 			opctx, stop := context.WithDeadline(ctx, request.Deadline)
 			defer stop()

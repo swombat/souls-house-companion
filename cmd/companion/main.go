@@ -468,6 +468,11 @@ func serve(dir, unit string) error {
 		}
 		runErr := c.RunOnce(ctx, &state)
 		snap.Close()
+		if errors.Is(runErr, client.ErrExecuteShutdown) {
+			// Do not reconnect or report a successful signal/pause shutdown
+			// when an execute worker has not completed its cleanup attempt.
+			return runErr
+		}
 		delay := 10 * time.Second
 		if errors.Is(runErr, client.ErrPaused) || errors.Is(runErr, client.ErrAuthority) {
 			delay = 5 * time.Minute
