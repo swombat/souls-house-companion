@@ -19,5 +19,10 @@ go vet ./...
 go build ./...
 ```
 
+The offline spike contains policy intersection, mountinfo identity validation
+with an injected UUID map, and an fd-rooted bounded read/stat/list engine.
+These are not yet connected into a service. See [the S0 checkpoint](docs/s0.md)
+for verified receipts, explicit security limitations and continuation.
+
 Linux installation, authenticated enrollment, house transport and Dell acceptance
 are not yet implemented. No Mac or Windows support is claimed.
