@@ -262,7 +262,10 @@ func serve(dir, unit string) error {
 	c.Save = func(s client.State) error { return client.Save(dir, s) }
 	for ctx.Err() == nil {
 		if _, err := os.Lstat(filepath.Join(dir, "paused")); !os.IsNotExist(err) {
-			return errors.New("locally paused")
+			if err == nil {
+				return nil // Intentional pause must not trigger Restart=on-failure.
+			}
+			return err
 		}
 		// Refuse unsupported mounts/protection before opening any socket.
 		mounts, snap, err := volumes.LoadSystem()

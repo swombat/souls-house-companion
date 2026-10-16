@@ -25,10 +25,20 @@ func TestCancellationDoesNotWaitForBlockedWorkersOrGrowThemOnReconnect(t *testin
 	defer close(release)
 	var started atomic.Int32
 	var denied atomic.Bool
+	unavailable := make(chan struct{}, 4)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/companion/session" {
 			json.NewEncoder(w).Encode(map[string]any{"device_id": "device", "device_credential": "shcd_next",
 				"cable_ticket": "synthetic-ticket", "revision": 1, "policy": policy.Policy{}})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/result") {
+			body, _ := io.ReadAll(r.Body)
+			if r.Header.Get("X-Companion-Error") != "unavailable" || len(body) != 0 {
+				t.Error("saturated worker did not return a safe unavailable result")
+			}
+			unavailable <- struct{}{}
+			w.WriteHeader(http.StatusCreated)
 			return
 		}
 		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"actioncable-v1-json"}})
@@ -83,12 +93,26 @@ func TestCancellationDoesNotWaitForBlockedWorkersOrGrowThemOnReconnect(t *testin
 		t.Fatal("authority change waited for blocked filesystem workers")
 	}
 	denied.Store(false)
-	if err := c.RunOnce(ctx, &state); err == nil {
-		t.Fatal("reconnect with exhausted worker slots accepted")
+	go func() { done <- c.RunOnce(ctx, &state) }()
+	for range 4 {
+		select {
+		case <-unavailable:
+		case err := <-done:
+			t.Fatalf("saturated socket disconnected instead of replying: %v", err)
+		case <-ctx.Done():
+			t.Fatal("saturated request was not reported")
+		}
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("saturated socket did not remain open: %v", err)
+	case <-time.After(300 * time.Millisecond):
 	}
 	if started.Load() != 4 {
 		t.Fatal("reconnect grew abandoned worker pool")
 	}
+	cancel()
+	<-done
 }
 
 type handlerFunc func(context.Context, Request, policy.Policy) ([]byte, string, error)

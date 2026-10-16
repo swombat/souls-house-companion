@@ -282,7 +282,13 @@ func (c *Client) RunOnce(ctx context.Context, state *State) error {
 		select {
 		case c.workerSlots <- struct{}{}:
 		default:
-			return ErrTransport
+			// Capacity exhaustion is terminal for this operation, not the
+			// connection. Report synchronously with its existing deadline;
+			// never add another worker just to reject excess work.
+			opctx, stop := context.WithDeadline(ctx, request.Deadline)
+			c.result(opctx, connectionState, request, nil, "json", errUnavailable)
+			stop()
+			continue
 		}
 		go func() {
 			defer func() { <-c.workerSlots }()
@@ -300,6 +306,8 @@ func (c *Client) RunOnce(ctx context.Context, state *State) error {
 	}
 }
 
+var errUnavailable = errors.New("companion worker capacity unavailable")
+
 func (c *Client) result(ctx context.Context, state State, r Request, data []byte, format string, failure error) {
 	if failure != nil {
 		data = nil // Never deliver a partial payload on a failed operation.
@@ -315,7 +323,11 @@ func (c *Client) result(ctx context.Context, state State, r Request, data []byte
 	req.Header.Set("X-Companion-Revision", strconv.Itoa(r.Revision))
 	req.Header.Set("X-Companion-Format", format)
 	if failure != nil {
-		req.Header.Set("X-Companion-Error", "failed")
+		outcome := "failed"
+		if errors.Is(failure, errUnavailable) {
+			outcome = "unavailable"
+		}
+		req.Header.Set("X-Companion-Error", outcome)
 	}
 	res, err := c.HTTP.Do(req)
 	if err == nil {
