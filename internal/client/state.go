@@ -20,6 +20,7 @@ type State struct {
 	Ceiling        policy.Policy `json:"ceiling"`
 	PendingSession string        `json:"pending_session,omitempty"`
 	Paused         bool          `json:"paused"`
+	Uninstalled    bool          `json:"uninstalled,omitempty"`
 }
 
 func Load(dir string) (State, error) {

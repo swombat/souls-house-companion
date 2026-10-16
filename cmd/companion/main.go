@@ -64,13 +64,16 @@ func run(args []string) error {
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
+	if args[0] == "uninstall" && !*user {
+		return errors.New("only user uninstall supported")
+	}
 	absolute, err := filepath.Abs(*dir)
 	if err != nil {
 		return err
 	}
 	*dir = absolute
 	unit := filepath.Join(home, ".config/systemd/user/souls-house-companion.service")
-	if args[0] == "pause" {
+	if args[0] == "pause" || args[0] == "uninstall" {
 		// Independent of the service-held state lock and systemd availability.
 		// Presence alone is deny; a failed stop must never leave delivery live.
 		if _, err := client.Load(*dir); err != nil {
@@ -98,6 +101,50 @@ func run(args []string) error {
 		defer lock.Close()
 	}
 	switch args[0] {
+	case "uninstall":
+		if !*user {
+			return errors.New("only user uninstall supported")
+		}
+		state, err := client.Load(*dir)
+		if err != nil {
+			return err
+		}
+		state.Paused = true
+		if err := client.Save(*dir, state); err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+		defer cancel()
+		// Failure keeps the credential and local deny marker. Never silently
+		// discard the only credential while house authority remains live.
+		if !state.Uninstalled {
+			if err := client.New(nil).Revoke(ctx, state); err != nil {
+				return err
+			}
+			state.Uninstalled, state.Credential, state.PendingSession = true, "", ""
+			if err := client.Save(*dir, state); err != nil {
+				return err
+			}
+		}
+		if err := systemctl("disable", "souls-house-companion.service"); err != nil {
+			return err
+		}
+		if info, err := os.Lstat(unit); err == nil {
+			if !info.Mode().IsRegular() {
+				return errors.New("unit must be regular")
+			}
+			if err := os.Remove(unit); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if err := systemctl("daemon-reload"); err != nil {
+			return err
+		}
+		// Credential removed durably above; keep non-secret ceiling/audit/lock
+		// and uninstall receipt for idempotent retry, never delete user files.
+		return nil
 	case "volumes":
 		mounts, snap, err := volumes.LoadSystem()
 		if err != nil {
@@ -139,7 +186,7 @@ func run(args []string) error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"version": version, "device_id": state.DeviceID, "paused": state.Paused,
-			"enrolled": true, "ceiling": state.Ceiling,
+			"enrolled": !state.Uninstalled, "ceiling": state.Ceiling,
 		})
 	case "policy":
 		state, err := client.Load(*dir)

@@ -28,21 +28,28 @@ var ErrPaused = errors.New("companion paused")
 var ErrAuthority = errors.New("companion authority refused")
 
 type Request struct {
-	Type       string          `json:"type"`
-	ID         string          `json:"request_id"`
-	DeviceID   string          `json:"device_id"`
-	ResidentID string          `json:"resident_id"`
-	Revision   int             `json:"grant_revision"`
-	Epoch      string          `json:"connection_epoch"`
-	Deadline   time.Time       `json:"deadline"`
-	Operation  string          `json:"operation"`
-	Arguments  json.RawMessage `json:"arguments"`
-	Policy     policy.Policy   `json:"policy"`
-	Paused     bool            `json:"paused"`
+	Type          string          `json:"type"`
+	ID            string          `json:"request_id"`
+	DeviceID      string          `json:"device_id"`
+	ResidentID    string          `json:"resident_id"`
+	Revision      int             `json:"grant_revision"`
+	Epoch         string          `json:"connection_epoch"`
+	Deadline      time.Time       `json:"deadline"`
+	Operation     string          `json:"operation"`
+	Arguments     json.RawMessage `json:"arguments"`
+	Policy        policy.Policy   `json:"policy"`
+	Paused        bool            `json:"paused"`
+	InputRequired bool            `json:"input_required"`
+	Input         []byte          `json:"-"`
 }
 
 type Handler interface {
 	Handle(context.Context, Request, policy.Policy) ([]byte, string, error)
+}
+
+// InputHandler checks both independent grants before secret input is fetched.
+type InputHandler interface {
+	AuthorizeInput(Request, policy.Policy) error
 }
 
 type Client struct {
@@ -153,6 +160,9 @@ type session struct {
 // RunOnce opens one connection. Its owner may reconnect, but requests and
 // results are never replayed. Cancellation suppresses delivery before Close.
 func (c *Client) RunOnce(ctx context.Context, state *State) error {
+	if state.Uninstalled {
+		return ErrAuthority
+	}
 	if state.Paused {
 		return errors.New("locally paused")
 	}
@@ -272,7 +282,7 @@ func (c *Client) RunOnce(ctx context.Context, state *State) error {
 		}
 		if request.Type != "request" || epoch == "" || request.Epoch != epoch || request.DeviceID != state.DeviceID ||
 			request.ID == "" || seen[request.ID] || !request.Deadline.After(time.Now()) ||
-			request.Deadline.After(time.Now().Add(31*time.Second)) || request.Policy.Validate() != nil {
+			!validDeadline(request, time.Now()) || request.Policy.Validate() != nil {
 			return ErrTransport
 		}
 		seen[request.ID] = true
@@ -294,7 +304,23 @@ func (c *Client) RunOnce(ctx context.Context, state *State) error {
 			defer func() { <-c.workerSlots }()
 			opctx, stop := context.WithDeadline(ctx, request.Deadline)
 			defer stop()
-			data, format, handlerErr := c.Handler.Handle(opctx, request, connectionState.Ceiling)
+			var handlerErr error
+			if request.InputRequired {
+				authorizer, ok := c.Handler.(InputHandler)
+				if !ok {
+					handlerErr = ErrAuthority
+				} else {
+					handlerErr = authorizer.AuthorizeInput(request, connectionState.Ceiling)
+				}
+				if handlerErr == nil {
+					request.Input, handlerErr = c.input(opctx, connectionState, request)
+				}
+			}
+			var data []byte
+			format := "json"
+			if handlerErr == nil {
+				data, format, handlerErr = c.Handler.Handle(opctx, request, connectionState.Ceiling)
+			}
 			if opctx.Err() != nil || (beforeDelivery != nil && beforeDelivery() != nil) {
 				return
 			}

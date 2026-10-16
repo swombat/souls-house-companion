@@ -23,6 +23,7 @@ func TestRealRailsActionCable(t *testing.T) {
 	}
 	var fixture struct {
 		URL, DeviceID, Credential string
+		Policy                    policy.Policy
 	}
 	data, err := os.ReadFile(path)
 	if err != nil || json.Unmarshal(data, &fixture) != nil {
@@ -37,30 +38,56 @@ func TestRealRailsActionCable(t *testing.T) {
 	proxy := httptest.NewTLSServer(httputil.NewSingleHostReverseProxy(target))
 	defer proxy.Close()
 	handled := make(chan struct{}, 1)
-	c := New(handlerFunc(func(context.Context, Request, policy.Policy) ([]byte, string, error) {
+	c := New(railsInputHandler{handlerFunc(func(_ context.Context, r Request, _ policy.Policy) ([]byte, string, error) {
+		if r.Operation == "write" && string(r.Input) != "input-fixture" {
+			t.Error("actual Rails write input mismatch")
+			return nil, "json", ErrTransport
+		}
+		if r.Operation == "execute" && string(r.Input) != `{"argv":["true"],"cwd":"/tmp"}` {
+			t.Error("actual Rails execution input mismatch")
+			return nil, "json", ErrTransport
+		}
 		handled <- struct{}{}
 		return []byte(`{"fixture":"real-rails"}`), "json", nil
-	}))
+	})})
 	tlsClient(c, proxy)
 	c.Save = func(State) error { return nil }
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	ended := make(chan error, 1)
-	state := State{URL: proxy.URL, DeviceID: fixture.DeviceID, Credential: fixture.Credential}
+	state := State{URL: proxy.URL, DeviceID: fixture.DeviceID, Credential: fixture.Credential, Ceiling: fixture.Policy}
 	go func() { ended <- c.RunOnce(ctx, &state) }()
-	select {
-	case <-handled:
-		// Keep the socket alive long enough for Rails to receive the HTTP body.
+	for range 3 {
 		select {
+		case <-handled:
 		case err := <-ended:
-			t.Fatalf("Rails connection ended before cancellation: %v", err)
-		case <-time.After(time.Second):
+			t.Fatalf("real Rails connection ended before request: %v", err)
+		case <-ctx.Done():
+			t.Fatal("real Rails operation never arrived")
 		}
+	}
+	// Keep the socket alive long enough for Rails to receive the final body.
+	select {
 	case err := <-ended:
-		t.Fatalf("real Rails connection ended before request: %v", err)
-	case <-ctx.Done():
-		t.Fatal("real Rails operation never arrived")
+		t.Fatalf("Rails connection ended before cancellation: %v", err)
+	case <-time.After(time.Second):
 	}
 	cancel()
 	<-ended
+}
+
+type railsInputHandler struct{ handlerFunc }
+
+func (railsInputHandler) AuthorizeInput(r Request, ceiling policy.Policy) error {
+	if r.Operation == "execute" && policy.AllowsExecute(ceiling, r.Policy, r.ResidentID) {
+		return nil
+	}
+	var args struct {
+		Volume string `json:"volume"`
+	}
+	if json.Unmarshal(r.Arguments, &args) == nil && r.Operation == "write" &&
+		policy.Allows(ceiling, r.Policy, r.ResidentID, args.Volume, policy.Write) {
+		return nil
+	}
+	return ErrAuthority
 }
