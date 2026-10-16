@@ -1,9 +1,10 @@
 # S2 Linux execute supervision primitive
 
-`Execute(ctx, Request{Argv, Cwd, Stdin, Timeout}) (Result, error)` is a standalone
-internal primitive, **not wired to policy, service, client, or CLI**. Integration
-must authorize full local-user execution, manage pause/revoke cancellation, and
-suppress stale delivery. Execute is not filesystem confinement or a sandbox:
+`Execute(ctx, Request{Argv, Cwd, Stdin, Timeout}) (Result, error)` is an internal
+primitive integrated through the S2 service/client path. That caller authorizes
+full local-user execution, manages pause/revoke cancellation, and suppresses
+stale delivery. This package alone is not an authorization boundary.
+Execute is not filesystem confinement or a sandbox:
 an explicit `/bin/sh -c ...` is permitted. A program with full user authority
 can deliberately start another user unit or otherwise evade its original
 cgroup; this protects ordinary descendants (including setsid/double-fork), not
