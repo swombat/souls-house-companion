@@ -1,0 +1,66 @@
+package client
+
+import (
+	"context"
+	"encoding/json"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/swombat/souls-house-companion/internal/policy"
+)
+
+// Invoked by the house's opt-in CompanionCableSmokeTest against a real local
+// Rails/Puma Action Cable server. Only synthetic test-DB credentials are passed
+// in a private temporary file; no production environment is inherited.
+func TestRealRailsActionCable(t *testing.T) {
+	path := os.Getenv("COMPANION_RAILS_FIXTURE")
+	if path == "" {
+		t.Skip("run through the house CompanionCableSmokeTest")
+	}
+	var fixture struct {
+		URL, DeviceID, Credential string
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(data, &fixture) != nil {
+		t.Fatal("invalid private Rails fixture")
+	}
+	target, err := url.Parse(fixture.URL)
+	if err != nil || target.Scheme != "http" || target.Hostname() != "127.0.0.1" {
+		t.Fatal("fixture must be a loopback Rails server")
+	}
+	// TLS at the Go client's boundary preserves production HTTPS validation;
+	// the proxy forwards actual WebSocket frames to Rails, not a fake server.
+	proxy := httptest.NewTLSServer(httputil.NewSingleHostReverseProxy(target))
+	defer proxy.Close()
+	handled := make(chan struct{}, 1)
+	c := New(handlerFunc(func(context.Context, Request, policy.Policy) ([]byte, string, error) {
+		handled <- struct{}{}
+		return []byte(`{"fixture":"real-rails"}`), "json", nil
+	}))
+	tlsClient(c, proxy)
+	c.Save = func(State) error { return nil }
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	ended := make(chan error, 1)
+	state := State{URL: proxy.URL, DeviceID: fixture.DeviceID, Credential: fixture.Credential}
+	go func() { ended <- c.RunOnce(ctx, &state) }()
+	select {
+	case <-handled:
+		// Keep the socket alive long enough for Rails to receive the HTTP body.
+		select {
+		case err := <-ended:
+			t.Fatalf("Rails connection ended before cancellation: %v", err)
+		case <-time.After(time.Second):
+		}
+	case err := <-ended:
+		t.Fatalf("real Rails connection ended before request: %v", err)
+	case <-ctx.Done():
+		t.Fatal("real Rails operation never arrived")
+	}
+	cancel()
+	<-ended
+}

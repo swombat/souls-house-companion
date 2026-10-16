@@ -202,25 +202,17 @@ func TestSymlinksAndRootSymlink(t *testing.T) {
 	}
 	root := fixtureRoot(t, dir)
 	for _, path := range []string{"internal", "escape", "magic", "directory", "directory/regular"} {
-		// O_PATH+O_NOFOLLOW may return the final symlink itself; Stat must
-		// reject that type as well as rejecting traversal of symlinks.
-		if _, err := root.Stat(context.Background(), path); err == nil {
-			t.Errorf("Stat symlink %s succeeded", path)
-		}
-		if _, err := root.Read(context.Background(), path, 0, 100); err == nil {
-			t.Errorf("Read symlink %s succeeded", path)
-		}
-		if _, err := root.List(context.Background(), path, 10); err == nil {
-			t.Errorf("List symlink %s succeeded", path)
-		}
+		assertOperationsError(t, root, path, ErrSymlink)
 	}
 	link := filepath.Join(base, "root-link")
 	if err := os.Symlink(dir, link); err != nil {
 		t.Fatal(err)
 	}
-	if opened, err := Open(link, nil); err == nil {
-		opened.Close()
-		t.Fatal("symlink root accepted")
+	if opened, err := Open(link, nil); !errors.Is(err, ErrSymlink) {
+		if opened != nil {
+			opened.Close()
+		}
+		t.Fatalf("symlink root = %v", err)
 	}
 }
 
@@ -431,9 +423,6 @@ func TestNestedExistingMountRefused(t *testing.T) {
 	// proc is conventionally a nested mount; EXDEV is the required evidence.
 	root := fixtureRoot(t, "/")
 	_, err := root.Stat(context.Background(), "proc")
-	if errors.Is(err, unix.ENOENT) {
-		t.Skip("no /proc mount in this test namespace")
-	}
 	if !errors.Is(err, unix.EXDEV) {
 		t.Fatalf("nested /proc lookup = %v; need a mounted /proc fixture", err)
 	}
@@ -495,25 +484,16 @@ func TestCancellationCloseAndRetainedRoot(t *testing.T) {
 	}
 }
 
-func TestProtectedPathsAreNotInodeLabels(t *testing.T) {
+func TestProtectedFileHardlinkDenied(t *testing.T) {
 	dir := t.TempDir()
 	writeFixture(t, filepath.Join(dir, "state"), "fixture only")
 	if err := os.Link(filepath.Join(dir, "state"), filepath.Join(dir, "alias")); err != nil {
 		t.Fatal(err)
 	}
 	root := fixtureRoot(t, dir, "state")
-	// This documents the explicit limitation rather than claiming secret
-	// protection from lexical state denials.
-	data, err := root.Read(context.Background(), "alias", 0, 100)
-	if err != nil || string(data) != "fixture only" {
-		t.Fatalf("documented hardlink limitation changed: %q, %v", data, err)
-	}
-	st, err := root.Stat(context.Background(), "alias")
-	if err != nil || st.Size != int64(len("fixture only")) || st.Directory {
-		t.Fatalf("hardlink alias Stat = %+v, %v", st, err)
-	}
+	assertOperationsError(t, root, "alias", ErrProtected)
 	list, err := root.List(context.Background(), ".", 10)
-	if err != nil || !slices.Equal(list.Names, []string{"alias"}) {
+	if err != nil || len(list.Names) != 0 {
 		t.Fatalf("hardlink alias listing = %+v, %v", list, err)
 	}
 	assertOperationsError(t, root, "state", ErrProtected)
@@ -531,19 +511,11 @@ func TestProtectedPathRenameAlias(t *testing.T) {
 	if err := os.Rename(state, filepath.Join(dir, "published")); err != nil {
 		t.Fatal(err)
 	}
-	// Lexical protection remains attached to the old name, not the moved
-	// directory inode. This is evidence of a limitation, not a security grant.
 	assertOperationsError(t, root, "state/file", ErrProtected)
-	data, err := root.Read(context.Background(), "published/file", 0, 100)
-	if err != nil || string(data) != "renamed fixture" {
-		t.Fatalf("renamed alias Read = %q, %v", data, err)
-	}
-	st, err := root.Stat(context.Background(), "published")
-	if err != nil || !st.Directory {
-		t.Fatalf("renamed alias Stat = %+v, %v", st, err)
-	}
-	list, err := root.List(context.Background(), "published", 10)
-	if err != nil || !slices.Equal(list.Names, []string{"file"}) {
-		t.Fatalf("renamed alias List = %+v, %v", list, err)
+	assertOperationsError(t, root, "published", ErrProtected)
+	assertOperationsError(t, root, "published/file", ErrProtected)
+	list, err := root.List(context.Background(), ".", 10)
+	if err != nil || len(list.Names) != 0 {
+		t.Fatalf("renamed ancestor listing = %+v, %v", list, err)
 	}
 }

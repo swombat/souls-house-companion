@@ -7,30 +7,32 @@
 // openat2 with BENEATH, NO_XDEV, NO_MAGICLINKS and NO_SYMLINKS; unsupported kernels
 // fail closed. All symlinks (even within the root) and nested mounts are refused.
 //
-// A retained root fd is an inode/mount reference, not a live pathname binding:
-// rename, overmount, detach, or changes to the root pathname do not revoke it.
-// Close and reopen explicitly when the caller's volume lifecycle changes.
+// Open is a fixture-level root; production callers must use OpenVerified.
+// Verified roots invalidate on any mount table change, checking before and
+// after operations. Close waits; it is never immediate cancellation.
 // Operations are not snapshots. Concurrent writes can change returned data.
 // Cancellation is checked between syscalls, but cannot interrupt a blocked
 // filesystem syscall (including on a slow or unavailable backing filesystem).
 //
-// Protected paths are lexical subtree denials, not inode labels. They do not
-// prevent access through preexisting hard links or newly renamed aliases.
-// Keep private state outside a shared root when alias-resistant secrecy matters.
+// Protected files are inode denials; protected directories deny their current
+// descendants through bounded parent-inode walks, including renamed ancestors.
+// This is not a filesystem transaction: external concurrent mutation can race
+// checks. A file moved OUT of a protected directory is not permanently labelled;
+// supply individual protected file identities when hardlink aliases matter.
 package linuxfs
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"math"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/swombat/souls-house-companion/internal/volumes"
 	"golang.org/x/sys/unix"
 )
 
@@ -48,33 +50,76 @@ var (
 	ErrBounds      = errors.New("linuxfs: request exceeds bounds")
 	ErrFileType    = errors.New("linuxfs: unsupported file type")
 	ErrClosed      = errors.New("linuxfs: root closed")
+	ErrSymlink     = errors.New("linuxfs: symlink refused")
+	ErrProcfs      = errors.New("linuxfs: trusted procfs unavailable")
+	ErrContainment = errors.New("linuxfs: ancestry cannot be safely established")
+	ErrMount       = errors.New("linuxfs: mount binding mismatch or unavailable")
+	ErrSubvolume   = errors.New("linuxfs: subvolume boundary unavailable or crossed")
 )
 
 // Root is safe for concurrent use. Close waits for in-flight operations.
 // Do not copy a Root.
 type Root struct {
-	mu        sync.RWMutex
-	fd        int
-	ready     bool
-	protected []string
+	mu         sync.RWMutex
+	fd         int
+	ready      bool
+	protected  []string
+	procFD     int
+	pins       []int
+	identities map[inode]bool
+	rootID     inode
+	snapshot   *volumes.Snapshot
+	invalid    atomic.Bool
+	subvolume  *uint64
+	subvolStat func(int, *unix.Statx_t) error // immutable after opening
 }
 
 // Open opens the root directory once, without following its final component.
 // The root path and its ancestor directories must be trusted by the caller:
 // O_NOFOLLOW on rootPath does not prohibit symlinks in its ancestors.
-// Each protected path denies itself and descendants. "." denies the entire root.
+// Mount table changes invalidate even fixture roots, but only OpenVerified binds
+// a root fd to an allowed discovery identity.
+// Each protected path must exist and denies itself and descendants. "." denies
+// the entire root.
 // Paths must be canonical relative paths, with no empty, "." or ".." components
 // (except "." itself), no NUL, and no trailing slash.
 func Open(rootPath string, protected []string) (*Root, error) {
+	r, err := openRoot(rootPath, protected, nil, unix.Fstatfs)
+	if err != nil {
+		return nil, err
+	}
+	r.snapshot, err = volumes.SnapshotCurrent()
+	if err != nil {
+		r.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
+// procProbe is passed per invocation so tests cannot replace a global probe.
+func openRoot(rootPath string, protected []string, identities *Protected, procProbe func(int, *unix.Statfs_t) error) (*Root, error) {
 	denied := append([]string(nil), protected...)
 	for _, path := range denied {
 		if err := validatePath(path); err != nil {
 			return nil, err
 		}
 	}
-	fd, err := unix.Open(rootPath, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open(rootPath, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("linuxfs: open root: %w", err)
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	if st.Mode&unix.S_IFMT == unix.S_IFLNK {
+		unix.Close(fd)
+		return nil, ErrSymlink
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+		unix.Close(fd)
+		return nil, unix.ENOTDIR
 	}
 	// Probe containment immediately, even when no request has yet been made.
 	probe, err := openAt(fd, ".", unix.O_PATH|unix.O_DIRECTORY)
@@ -83,7 +128,47 @@ func Open(rootPath string, protected []string) (*Root, error) {
 		return nil, fmt.Errorf("linuxfs: containment unavailable: %w", err)
 	}
 	unix.Close(probe)
-	return &Root{fd: fd, ready: true, protected: denied}, nil
+	procFD, err := unix.Open("/proc/self/fd", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		unix.Close(fd)
+		return nil, fmt.Errorf("%w: %v", ErrProcfs, err)
+	}
+	var fs unix.Statfs_t
+	if err := procProbe(procFD, &fs); err != nil || fs.Type != unix.PROC_SUPER_MAGIC {
+		unix.Close(procFD)
+		unix.Close(fd)
+		return nil, ErrProcfs
+	}
+	r := &Root{fd: fd, procFD: procFD, ready: true, protected: denied, identities: make(map[inode]bool), subvolStat: statSubvolume}
+	r.rootID = identity(&st)
+	var rootFS unix.Statfs_t
+	if err := unix.Fstatfs(fd, &rootFS); err != nil {
+		r.Close()
+		return nil, err
+	}
+	if rootFS.Type == unix.BTRFS_SUPER_MAGIC {
+		var sx unix.Statx_t
+		if err := r.subvolStat(fd, &sx); err != nil || sx.Mask&unix.STATX_SUBVOL == 0 {
+			r.Close()
+			return nil, ErrSubvolume
+		}
+		r.subvolume = &sx.Subvol
+	}
+	if err := r.copyProtected(identities); err != nil {
+		r.Close()
+		return nil, err
+	}
+	for _, path := range denied {
+		pin, err := openAt(fd, path, unix.O_PATH)
+		if err == nil {
+			err = r.addPin(pin)
+		}
+		if err != nil {
+			r.Close()
+			return nil, fmt.Errorf("linuxfs: capture relative protected path: %w", err)
+		}
+	}
+	return r, nil
 }
 
 func (r *Root) Close() error {
@@ -94,6 +179,14 @@ func (r *Root) Close() error {
 	}
 	err := unix.Close(r.fd)
 	r.fd = -1
+	unix.Close(r.procFD)
+	for _, fd := range r.pins {
+		unix.Close(fd)
+	}
+	r.pins = nil
+	if r.snapshot != nil {
+		r.snapshot.Close()
+	}
 	return err
 }
 
@@ -134,14 +227,18 @@ func (r *Root) check(ctx context.Context, path string) error {
 	if !r.ready || r.fd < 0 {
 		return ErrClosed
 	}
-	return nil
+	return r.checkMount()
 }
 
 func openAt(root int, path string, flags int) (int, error) {
-	return unix.Openat2(root, path, &unix.OpenHow{
+	fd, err := unix.Openat2(root, path, &unix.OpenHow{
 		Flags:   uint64(flags | unix.O_CLOEXEC | unix.O_NOFOLLOW),
 		Resolve: resolveFlags,
 	})
+	if errors.Is(err, unix.ELOOP) {
+		return -1, ErrSymlink
+	}
+	return fd, err
 }
 
 // Metadata deliberately excludes file content, inode identifiers and ownership.
@@ -160,21 +257,21 @@ func (r *Root) Stat(ctx context.Context, path string) (Metadata, error) {
 		return Metadata{}, err
 	}
 	// O_PATH avoids opening a device or blocking on a FIFO.
-	fd, err := openAt(r.fd, path, unix.O_PATH)
+	h, err := r.lookup(path)
 	if err != nil {
 		return Metadata{}, err
 	}
-	defer unix.Close(fd)
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		return Metadata{}, err
-	}
+	defer h.close()
+	st := h.st
 	if err := ctx.Err(); err != nil {
 		return Metadata{}, err
 	}
 	kind := st.Mode & unix.S_IFMT
 	if kind != unix.S_IFREG && kind != unix.S_IFDIR {
 		return Metadata{}, ErrFileType
+	}
+	if err := h.check(r); err != nil {
+		return Metadata{}, err
 	}
 	return Metadata{
 		Size: st.Size, Directory: kind == unix.S_IFDIR, Mode: st.Mode & 0777,
@@ -198,15 +295,12 @@ func (r *Root) Read(ctx context.Context, path string, offset int64, limit int) (
 	if err := r.check(ctx, path); err != nil {
 		return nil, err
 	}
-	pathFD, err := openAt(r.fd, path, unix.O_PATH)
+	h, err := r.lookup(path)
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(pathFD)
-	var st unix.Stat_t
-	if err := unix.Fstat(pathFD, &st); err != nil {
-		return nil, err
-	}
+	defer h.close()
+	st := h.st
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return nil, ErrFileType
 	}
@@ -215,7 +309,7 @@ func (r *Root) Read(ctx context.Context, path string, offset int64, limit int) (
 	}
 	// This intentional procfs magic link refers to our own still-open O_PATH
 	// descriptor. Untrusted lookup already completed under openat2 containment.
-	fd, err := unix.Open("/proc/self/fd/"+strconv.Itoa(pathFD),
+	fd, err := unix.Openat(r.procFD, strconv.Itoa(h.fd),
 		unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
@@ -227,6 +321,9 @@ func (r *Root) Read(ctx context.Context, path string, offset int64, limit int) (
 	}
 	if opened.Dev != st.Dev || opened.Ino != st.Ino || opened.Mode&unix.S_IFMT != unix.S_IFREG {
 		return nil, ErrFileType
+	}
+	if err := r.checkLeaf(fd, &opened); err != nil {
+		return nil, err
 	}
 	st = opened
 	// Avoid allocating the full cap for a small file; concurrent growth is not
@@ -260,6 +357,9 @@ func (r *Root) Read(ctx context.Context, path string, offset int64, limit int) (
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := h.check(r); err != nil {
+		return nil, err
+	}
 	return buf[:n], nil
 }
 
@@ -269,45 +369,12 @@ func (r *Root) Read(ctx context.Context, path string, offset int64, limit int) (
 type Listing struct {
 	Names     []string
 	Truncated bool
+	Skipped   int
 }
 
-// List reads at most limit+1 directory names, without following or statting any
-// child. Names of special files/symlinks may be listed, but cannot be read/stat'ed.
-// Protected subtrees are omitted. There is intentionally no recursive listing.
+// List reads at most limit+1 names and checks child O_PATH inode identities.
+// Protected entries and symlinks are omitted. No recursive listing is offered.
 func (r *Root) List(ctx context.Context, path string, limit int) (Listing, error) {
-	if limit <= 0 || limit > MaxListEntries {
-		return Listing{}, ErrBounds
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if err := r.check(ctx, path); err != nil {
-		return Listing{}, err
-	}
-	fd, err := openAt(r.fd, path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK)
-	if err != nil {
-		return Listing{}, err
-	}
-	file := os.NewFile(uintptr(fd), "linuxfs-directory")
-	defer file.Close()
-	names, err := file.Readdirnames(limit + 1)
-	if err != nil && err != io.EOF {
-		return Listing{}, err
-	}
-	out := Listing{Names: make([]string, 0, min(len(names), limit)), Truncated: len(names) > limit}
-	for _, name := range names[:min(len(names), limit)] {
-		if err := ctx.Err(); err != nil {
-			return Listing{}, err
-		}
-		child := name
-		if path != "." {
-			child = path + "/" + name
-		}
-		if !r.denied(child) {
-			out.Names = append(out.Names, name)
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return Listing{}, err
-	}
-	return out, nil
+	page, err := r.ListPage(ctx, path, nil, limit)
+	return Listing{Names: page.Names, Truncated: page.Truncated, Skipped: page.Skipped}, err
 }
