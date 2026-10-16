@@ -25,6 +25,9 @@ import (
 
 var version = "development"
 
+const companionUnit = "souls-house-companion.service"
+const systemctlTimeout = 35 * time.Second
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		// Error values from network/operation payloads are never interpolated.
@@ -88,7 +91,10 @@ func run(args []string) error {
 		if syncErr != nil {
 			return syncErr
 		}
-		if err := systemctl("stop", "souls-house-companion.service"); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), systemctlTimeout)
+		err = stopUserUnit(ctx)
+		cancel()
+		if err != nil {
 			return err
 		}
 	}
@@ -126,7 +132,7 @@ func run(args []string) error {
 				return err
 			}
 		}
-		if err := systemctl("disable", "souls-house-companion.service"); err != nil {
+		if err := disableUserUnit(ctx, unit); err != nil {
 			return err
 		}
 		if info, err := os.Lstat(unit); err == nil {
@@ -257,13 +263,109 @@ func loadPolicy(path string) (policy.Policy, error) {
 }
 
 func systemctl(args ...string) error {
-	cmd := exec.Command("systemctl", append([]string{"--user"}, args...)...)
+	ctx, cancel := context.WithTimeout(context.Background(), systemctlTimeout)
+	defer cancel()
+	_, err := systemctlOutput(ctx, args...)
+	return err
+}
+
+func systemctlOutput(ctx context.Context, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "systemctl", append([]string{"--user"}, args...)...)
+	cmd.WaitDelay = time.Second
 	for _, key := range []string{"HOME", "PATH", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"} {
 		if v, ok := os.LookupEnv(key); ok {
 			cmd.Env = append(cmd.Env, key+"="+v)
 		}
 	}
-	return cmd.Run()
+	output, err := cmd.Output()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return output, err
+}
+
+type userUnitState struct {
+	load, active string
+}
+
+// A missing file is not evidence that the manager has stopped its service.
+// Require a successful structured query; never infer absence from an exit code
+// or a localized diagnostic (including connection/authorization failures).
+func inspectUserUnit(ctx context.Context) (userUnitState, error) {
+	output, err := systemctlOutput(ctx, "show", "--property=LoadState", "--property=ActiveState", companionUnit)
+	if err != nil {
+		return userUnitState{}, err
+	}
+	var state userUnitState
+	for _, line := range strings.Split(strings.TrimSuffix(string(output), "\n"), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || value == "" {
+			return userUnitState{}, errors.New("invalid unit properties")
+		}
+		switch key {
+		case "LoadState":
+			if state.load != "" {
+				return userUnitState{}, errors.New("duplicate unit property")
+			}
+			state.load = value
+		case "ActiveState":
+			if state.active != "" {
+				return userUnitState{}, errors.New("duplicate unit property")
+			}
+			state.active = value
+		default:
+			return userUnitState{}, errors.New("unexpected unit property")
+		}
+	}
+	if state.load == "" || state.active == "" {
+		return userUnitState{}, errors.New("missing unit property")
+	}
+	return state, nil
+}
+
+func (s userUnitState) absent() bool {
+	return s.load == "not-found" && s.active == "inactive"
+}
+
+func stopUserUnit(ctx context.Context) error {
+	state, err := inspectUserUnit(ctx)
+	if err != nil {
+		return err
+	}
+	if state.absent() {
+		// systemd 260 reports stop of a missing unit as exit 5. There is no
+		// stop to perform only when the reachable manager confirms quiescence.
+		return nil
+	}
+	if _, err := systemctlOutput(ctx, "stop", companionUnit); err != nil {
+		return err
+	}
+	state, err = inspectUserUnit(ctx)
+	if err != nil {
+		return err
+	}
+	if state.active != "inactive" || (state.load != "loaded" && !state.absent()) {
+		return errors.New("unit not confirmed inactive")
+	}
+	return nil
+}
+
+func disableUserUnit(ctx context.Context, unitPath string) error {
+	if _, err := os.Lstat(unitPath); os.IsNotExist(err) {
+		state, err := inspectUserUnit(ctx)
+		if err != nil {
+			return err
+		}
+		if state.absent() {
+			// disable of a missing unit exits 1, indistinguishable from other
+			// failures. Skip the operation only with affirmative absence.
+			return nil
+		}
+	} else if err != nil {
+		return err
+	}
+	_, err := systemctlOutput(ctx, "disable", companionUnit)
+	return err
 }
 
 func installUnit(path, dir string) error {
