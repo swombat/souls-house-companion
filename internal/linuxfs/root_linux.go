@@ -1,6 +1,8 @@
 //go:build linux
 
-// Package linuxfs provides a small, read-only, fd-rooted Linux filesystem engine.
+// Package linuxfs provides a small, fd-rooted Linux filesystem engine.
+// Mutations are local primitives only; see mutation_linux.go for their stricter
+// type/alias limits and non-transactional namespace-writer boundary.
 //
 // The caller supplies a trusted root, authorizes requests, and owns its lifetime.
 // There is no volume discovery or grant enforcement here. Every lookup uses
