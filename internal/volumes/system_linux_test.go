@@ -12,13 +12,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestBtrfsExplicitlyDenied(t *testing.T) {
+func TestBtrfsMetadataAloneCannotApprove(t *testing.T) {
 	mounts, err := Discover(strings.NewReader("20 1 8:1 /@ / rw - btrfs /dev/sda1 rw"), UUIDs{"8:1": {"fixture"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(mounts) != 1 || mounts[0].Key != "" || !strings.Contains(mounts[0].Denied, "subvolume") {
-		t.Fatalf("btrfs must remain explicitly unassessed: %+v", mounts)
+		t.Fatalf("btrfs requires opened-mount evidence: %+v", mounts)
 	}
 }
 

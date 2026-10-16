@@ -134,7 +134,8 @@ func (s *Snapshot) Close() error {
 // LoadSystem discovers current mounts and UUIDs from trusted system metadata.
 // The caller owns the returned snapshot and must Close it. Denied rows remain
 // in the result with an explanation; a missing by-uuid directory denies all
-// UUID-dependent volumes rather than making up an identity.
+// block-device UUID-dependent volumes rather than making up an identity.
+// Btrfs uses the opened mount's FS_INFO UUID instead of block-device aliases.
 func LoadSystem() ([]Mount, *Snapshot, error) {
 	snapshot, err := SnapshotCurrent()
 	if err != nil {
@@ -145,7 +146,7 @@ func LoadSystem() ([]Mount, *Snapshot, error) {
 		snapshot.Close()
 		return nil, nil, err
 	}
-	mounts, err := Discover(bytes.NewReader(snapshot.data), uuids)
+	mounts, err := discover(bytes.NewReader(snapshot.data), uuids, probeBtrfsMount)
 	if err == nil {
 		err = snapshot.Validate()
 	}
