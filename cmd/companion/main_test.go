@@ -1,13 +1,101 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/swombat/souls-house-companion/internal/client"
+	"github.com/swombat/souls-house-companion/internal/linuxfs"
 	"github.com/swombat/souls-house-companion/internal/policy"
 )
+
+func TestServiceConfigurationSubtreesDenyMutations(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "state")
+	if err := client.Save(dir, client.State{}); err != nil {
+		t.Fatal(err)
+	}
+	unit := filepath.Join(home, ".config/systemd/user/souls-house-companion.service")
+	exe := filepath.Join(home, "companion")
+	if err := os.MkdirAll(filepath.Dir(unit), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{unit, exe} {
+		if err := os.WriteFile(path, []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths, err := prepareProtectedPaths(home, dir, unit, exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Missing environment.d must acquire an identity before the first socket.
+	pins, err := linuxfs.CaptureProtected(paths...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pins.Close()
+	var relative []string
+	for _, path := range paths {
+		rel, err := filepath.Rel(home, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		relative = append(relative, rel)
+	}
+	root, err := linuxfs.Open(home, relative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	ctx := context.Background()
+	for _, path := range []string{
+		".config/systemd/user/souls-house-companion.service.d",
+		".config/environment.d/injected",
+	} {
+		result, err := root.Mkdir(ctx, path)
+		if !errors.Is(err, linuxfs.ErrProtected) || result.Committed {
+			t.Fatalf("protected mkdir %s: %+v %v", path, result, err)
+		}
+	}
+	for _, subtree := range []string{".config/systemd/user", ".config/environment.d"} {
+		target := subtree + "/override.conf"
+		if err := os.WriteFile(filepath.Join(home, target), []byte("keep"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		result, err := root.Write(ctx, target, []byte("replace"), linuxfs.WriteOverwrite)
+		if !errors.Is(err, linuxfs.ErrProtected) || result.Committed {
+			t.Fatalf("protected write: %+v %v", result, err)
+		}
+		result, err = root.Rename(ctx, target, "escaped")
+		if !errors.Is(err, linuxfs.ErrProtected) || result.Committed {
+			t.Fatalf("protected rename: %+v %v", result, err)
+		}
+		if err := os.Mkdir(filepath.Join(home, "trash"), 0700); err != nil && !os.IsExist(err) {
+			t.Fatal(err)
+		}
+		result, err = root.Trash(ctx, target, "trash", "receipt")
+		if !errors.Is(err, linuxfs.ErrProtected) || result.Committed {
+			t.Fatalf("protected trash: %+v %v", result, err)
+		}
+	}
+}
+
+func TestServiceConfigurationSymlinkFailsClosed(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".config"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(home, ".config/environment.d")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareProtectedPaths(home, "unused", filepath.Join(home, ".config/systemd/user/unit"), "unused"); err == nil {
+		t.Fatal("symlinked environment configuration accepted")
+	}
+}
 
 func TestPauseDeniesEvenWhenSystemctlFailsAndServiceLockHeld(t *testing.T) {
 	home := t.TempDir()

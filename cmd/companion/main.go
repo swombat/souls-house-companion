@@ -304,7 +304,15 @@ func serve(dir, unit string) error {
 	if err != nil {
 		return err
 	}
-	handler := &service.Handler{ProtectedPaths: []string{dir, filepath.Join(dir, "state.json"), unit, exe}}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	protectedPaths, err := prepareProtectedPaths(home, dir, unit, exe)
+	if err != nil {
+		return err
+	}
+	handler := &service.Handler{ProtectedPaths: protectedPaths}
 	c := client.New(handler)
 	c.Save = func(s client.State) error { return client.Save(dir, s) }
 	for ctx.Err() == nil {
@@ -363,6 +371,28 @@ func serve(dir, unit string) error {
 		}
 	}
 	return nil
+}
+
+// Protect configuration that can change the companion's execution environment,
+// not just its current unit file. CaptureProtected requires existing identities:
+// prepare missing directories locally before exposing any remote file tools.
+// Existing modes are not changed; symlink/non-directory targets fail closed.
+func prepareProtectedPaths(home, dir, unit, exe string) ([]string, error) {
+	serviceDir := filepath.Dir(unit)
+	environmentDir := filepath.Join(home, ".config/environment.d")
+	for _, path := range []string{serviceDir, environmentDir} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			return nil, err
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() {
+			return nil, errors.New("protected configuration must be a directory")
+		}
+	}
+	return []string{dir, filepath.Join(dir, "state.json"), unit, exe, serviceDir, environmentDir}, nil
 }
 
 func locallyGranted(p policy.Policy, key string) bool {
