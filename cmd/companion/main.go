@@ -378,7 +378,7 @@ func serve(dir, unit string) error {
 // prepare missing directories locally before exposing any remote file tools.
 // Existing modes are not changed; symlink/non-directory targets fail closed.
 func prepareProtectedPaths(home, dir, unit, exe string) ([]string, error) {
-	serviceDir := filepath.Dir(unit)
+	serviceDir := filepath.Dir(filepath.Dir(unit))
 	environmentDir := filepath.Join(home, ".config/environment.d")
 	for _, path := range []string{serviceDir, environmentDir} {
 		if err := os.MkdirAll(path, 0700); err != nil {

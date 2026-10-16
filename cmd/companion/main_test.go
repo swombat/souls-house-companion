@@ -54,6 +54,7 @@ func TestServiceConfigurationSubtreesDenyMutations(t *testing.T) {
 	ctx := context.Background()
 	for _, path := range []string{
 		".config/systemd/user/souls-house-companion.service.d",
+		".config/systemd/user.conf.d",
 		".config/environment.d/injected",
 	} {
 		result, err := root.Mkdir(ctx, path)
@@ -61,7 +62,11 @@ func TestServiceConfigurationSubtreesDenyMutations(t *testing.T) {
 			t.Fatalf("protected mkdir %s: %+v %v", path, result, err)
 		}
 	}
-	for _, subtree := range []string{".config/systemd/user", ".config/environment.d"} {
+	result, err := root.Write(ctx, ".config/systemd/user.conf", []byte("[Manager]\nDefaultEnvironment=LD_PRELOAD=fixture"), linuxfs.WriteCreate)
+	if !errors.Is(err, linuxfs.ErrProtected) || result.Committed {
+		t.Fatalf("protected manager configuration create: %+v %v", result, err)
+	}
+	for _, subtree := range []string{".config/systemd", ".config/systemd/user", ".config/environment.d"} {
 		target := subtree + "/override.conf"
 		if err := os.WriteFile(filepath.Join(home, target), []byte("keep"), 0600); err != nil {
 			t.Fatal(err)
