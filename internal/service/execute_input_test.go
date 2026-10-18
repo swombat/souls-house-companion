@@ -7,6 +7,7 @@ import (
 
 	"github.com/swombat/souls-house-companion/internal/client"
 	"github.com/swombat/souls-house-companion/internal/policy"
+	"github.com/swombat/souls-house-companion/internal/runner"
 )
 
 func TestExecuteInputStrictAndBinaryStdin(t *testing.T) {
@@ -30,7 +31,7 @@ func TestExecuteInputStrictAndBinaryStdin(t *testing.T) {
 func TestInputAuthorityIntersectsIndependentGrants(t *testing.T) {
 	read := policy.Policy{Residents: []policy.Resident{{ID: "actor", Volumes: []policy.Grant{{Volume: "volume", Access: policy.Read}}}}}
 	write := policy.Policy{Residents: []policy.Resident{{ID: "actor", Volumes: []policy.Grant{{Volume: "volume", Access: policy.Write}}, Execute: true}}}
-	h := &Handler{}
+	h := &Handler{ExecuteLifecycle: runner.Lifecycle}
 	r := client.Request{ResidentID: "actor", Operation: "write", Arguments: json.RawMessage(`{"volume":"volume"}`)}
 	for _, pair := range [][2]policy.Policy{{read, write}, {write, read}, {read, read}} {
 		r.Policy = pair[1]

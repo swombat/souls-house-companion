@@ -21,6 +21,13 @@ import (
 // to test Handle's independent production volume discovery/policy boundary.
 func scanFixtureRoot(t *testing.T, path string, protected ...string) *linuxfs.Root {
 	t.Helper()
+	// Only normalize the trusted temporary fixture prefix. macOS's TMPDIR
+	// commonly passes through /var -> /private/var; production engine paths
+	// must remain nofollow and must never gain this fallback.
+	path, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	root, err := linuxfs.Open(path, protected)
 	if err != nil {
 		t.Fatal(err)

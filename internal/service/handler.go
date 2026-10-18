@@ -32,7 +32,7 @@ func (h *Handler) AuthorizeInput(request client.Request, ceiling policy.Policy) 
 			return nil
 		}
 	case "execute":
-		if policy.AllowsExecute(ceiling, request.Policy, request.ResidentID) {
+		if executeLifecycleAllowed(h.ExecuteLifecycle) && policy.AllowsExecute(ceiling, request.Policy, request.ResidentID) {
 			return nil
 		}
 	}
@@ -40,10 +40,11 @@ func (h *Handler) AuthorizeInput(request client.Request, ceiling policy.Policy) 
 }
 
 type Handler struct {
-	ProtectedPaths []string
-	mu             sync.Mutex
-	cursors        map[string]*scan
-	cursorCounts   map[string]int
+	ProtectedPaths   []string
+	ExecuteLifecycle string
+	mu               sync.Mutex
+	cursors          map[string]*scan
+	cursorCounts     map[string]int
 }
 
 type arguments struct {
@@ -63,6 +64,11 @@ type arguments struct {
 }
 
 func (h *Handler) Handle(ctx context.Context, request client.Request, ceiling policy.Policy) ([]byte, string, error) {
+	data, format, err := h.handle(ctx, request, ceiling)
+	return platformResult(data, format, err)
+}
+
+func (h *Handler) handle(ctx context.Context, request client.Request, ceiling policy.Policy) ([]byte, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "json", err
 	}
@@ -94,7 +100,10 @@ func (h *Handler) Handle(ctx context.Context, request client.Request, ceiling po
 		}
 		data, err := json.Marshal(map[string]any{"status": status, "exit_code": result.ExitCode,
 			"stdout_base64": result.Stdout, "stderr_base64": result.Stderr,
-			"stdout_truncated": result.StdoutTruncated, "stderr_truncated": result.StderrTruncated})
+			"stdout_truncated": result.StdoutTruncated, "stderr_truncated": result.StderrTruncated,
+			"execute_lifecycle":            runner.Lifecycle,
+			"possible_escaped_descendants": result.PossibleEscapedDescendants,
+			"escape_scan_unavailable":      result.EscapeScanUnavailable})
 		return data, "json", err
 	}
 	mounts, snapshot, err := volumes.LoadSystem()
