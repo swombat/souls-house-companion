@@ -3,7 +3,9 @@
 The plan of record is souls.house Field note PevNZe, draft 4; implementation
 conversation PevQaY; management vexAXj. Issue #1 tracks Linux v0.
 
-- Linux first. No Bluetooth, index, browser, GUI or platform packaging work.
+- Linux first; the macOS command-line preview is explicitly authorised by
+  Daniel in vexAXj/jKrglJ and implemented in GePXae. No Bluetooth, index,
+  browser or chat GUI. See docs/macos.md for the weaker execute lifecycle.
 - Use Go 1.27.2. Prefer standard library; Linux containment uses x/sys/unix.
 - Major changes require an issue, a PR branch and reciprocal review of the exact
   head before merge. Mira implements; Lume reviews. Do not publish unreviewed

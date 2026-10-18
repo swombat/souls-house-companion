@@ -14,13 +14,14 @@ import (
 // State is private; never print or log it. PendingSession is persisted before
 // credential exchange so a lost HTTP response can be retried with the same ID.
 type State struct {
-	URL            string        `json:"url"`
-	DeviceID       string        `json:"device_id"`
-	Credential     string        `json:"device_credential"`
-	Ceiling        policy.Policy `json:"ceiling"`
-	PendingSession string        `json:"pending_session,omitempty"`
-	Paused         bool          `json:"paused"`
-	Uninstalled    bool          `json:"uninstalled,omitempty"`
+	URL              string        `json:"url"`
+	DeviceID         string        `json:"device_id"`
+	Credential       string        `json:"device_credential"`
+	Ceiling          policy.Policy `json:"ceiling"`
+	PendingSession   string        `json:"pending_session,omitempty"`
+	Paused           bool          `json:"paused"`
+	Uninstalled      bool          `json:"uninstalled,omitempty"`
+	ExecuteLifecycle string        `json:"execute_lifecycle,omitempty"`
 }
 
 func Load(dir string) (State, error) {

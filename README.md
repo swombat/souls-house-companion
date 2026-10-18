@@ -31,4 +31,6 @@ Directory copy/rename/move/trash are not supported.
 Btrfs discovery and opened-root UUID binding are implemented fail-closed;
 fixture tests do not establish actual-host subvolume or lifecycle acceptance.
 No installed service or completed Dell acceptance is claimed by this source
-change. No Mac or Windows support is claimed.
+change. A Linux-cross-built macOS command-line preview is under development;
+see [its boundaries and acceptance gates](docs/macos.md). No Mac runtime
+acceptance or Windows support is claimed.

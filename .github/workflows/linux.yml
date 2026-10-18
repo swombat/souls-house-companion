@@ -1,4 +1,4 @@
-name: Linux foundation
+name: Companion checks
 
 on:
   push:
@@ -25,3 +25,14 @@ jobs:
         run: go test -race ./...
       - name: Build
         run: go build ./...
+      - name: Darwin cross-build and Mach-O checks (not runtime tests)
+        run: sh scripts/build-macos.sh
+      - name: Compile Darwin tests without executing them
+        shell: bash
+        run: |
+          set -euo pipefail
+          for arch in arm64 amd64; do
+            while read -r pkg; do
+              CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go test -c "$pkg" -o /tmp/companion-darwin.test
+            done < <(CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go list ./...)
+          done

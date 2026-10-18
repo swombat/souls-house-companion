@@ -20,6 +20,7 @@ import (
 )
 
 const (
+	Lifecycle   = "linux-cgroup-v1"
 	MaxTimeout  = 300 * time.Second
 	OutputLimit = 1 << 20 // Per stream; excess bytes are drained and discarded.
 
@@ -56,6 +57,10 @@ type Result struct {
 	Stdout, Stderr                   []byte
 	StdoutTruncated, StderrTruncated bool
 	ExitCode                         int
+	PossibleEscapedDescendants       int
+	EscapeScanUnavailable            bool
+	PossibleEscapedCandidates        []EscapeCandidate
+	EscapeCandidatesTruncated        bool
 }
 
 // Execute uses only the current UID's ordinary user manager at /run/user/UID.

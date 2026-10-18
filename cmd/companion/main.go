@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
@@ -19,19 +18,19 @@ import (
 	"github.com/swombat/souls-house-companion/internal/client"
 	"github.com/swombat/souls-house-companion/internal/linuxfs"
 	"github.com/swombat/souls-house-companion/internal/policy"
+	"github.com/swombat/souls-house-companion/internal/runner"
 	"github.com/swombat/souls-house-companion/internal/service"
 	"github.com/swombat/souls-house-companion/internal/volumes"
 )
 
 var version = "development"
 
-const companionUnit = "souls-house-companion.service"
 const systemctlTimeout = 35 * time.Second
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		// Error values from network/operation payloads are never interpolated.
-		fmt.Fprintln(os.Stderr, "companion: command failed; check configuration, authority and service status")
+		fmt.Fprintln(os.Stderr, platformDiagnostic(err))
 		os.Exit(1)
 	}
 }
@@ -63,6 +62,8 @@ func run(args []string) error {
 	policyFile := flags.String("policy", "", "local ceiling JSON")
 	tokenStdin := flags.Bool("token-stdin", false, "read enrollment token from stdin")
 	user := flags.Bool("user", false, "install ordinary user unit only")
+	contract := flags.String("accept-contract", "", "explicit local acceptance of versioned execute lifecycle; see docs/macos.md")
+	revokeContract := flags.Bool("revoke", false, "revoke local execute lifecycle acceptance (pause first)")
 	_ = flags.Bool("json", false, "machine-readable status")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
@@ -75,7 +76,7 @@ func run(args []string) error {
 		return err
 	}
 	*dir = absolute
-	unit := filepath.Join(home, ".config/systemd/user/souls-house-companion.service")
+	unit := userUnitPath(home)
 	if args[0] == "pause" || args[0] == "uninstall" {
 		// Independent of the service-held state lock and systemd availability.
 		// Presence alone is deny; a failed stop must never leave delivery live.
@@ -107,6 +108,16 @@ func run(args []string) error {
 		defer lock.Close()
 	}
 	switch args[0] {
+	case "execute-lifecycle":
+		if (*revokeContract && *contract != "") || (!*revokeContract && *contract != runner.Lifecycle) {
+			return errors.New("exact lifecycle contract acceptance required")
+		}
+		state, err := client.Load(*dir)
+		if err != nil {
+			return err
+		}
+		state.ExecuteLifecycle = *contract // --revoke leaves this empty
+		return client.Save(*dir, state)
 	case "uninstall":
 		if !*user {
 			return errors.New("only user uninstall supported")
@@ -145,7 +156,7 @@ func run(args []string) error {
 		} else if !os.IsNotExist(err) {
 			return err
 		}
-		if err := systemctl("daemon-reload"); err != nil {
+		if err := reloadUserManager(); err != nil {
 			return err
 		}
 		// Credential removed durably above; keep non-secret ceiling/audit/lock
@@ -190,10 +201,16 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{
+		localStatus := map[string]any{
 			"version": version, "device_id": state.DeviceID, "paused": state.Paused,
 			"enrolled": !state.Uninstalled, "ceiling": state.Ceiling,
-		})
+			"execute_lifecycle": runner.Lifecycle, "accepted_execute_lifecycle": state.ExecuteLifecycle,
+		}
+		if _, markerErr := os.Lstat(filepath.Join(*dir, "paused")); !os.IsNotExist(markerErr) {
+			localStatus["paused"] = true // marker presence/error is always deny
+		}
+		addPlatformStatus(localStatus)
+		return json.NewEncoder(os.Stdout).Encode(localStatus)
 	case "policy":
 		state, err := client.Load(*dir)
 		if err != nil {
@@ -237,7 +254,16 @@ func run(args []string) error {
 			if err := os.Remove(filepath.Join(*dir, "paused")); err != nil && !os.IsNotExist(err) {
 				return err
 			}
-			return systemctl("start", "souls-house-companion.service")
+			if err := startUserUnit(unit); err != nil {
+				// A failed bootstrap must not silently remove local denial.
+				marker, markerErr := os.OpenFile(filepath.Join(*dir, "paused"), os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
+				if markerErr == nil {
+					markerErr = marker.Sync()
+					marker.Close()
+				}
+				return errors.Join(err, markerErr)
+			}
+			return nil
 		}
 		return nil
 	case "serve":
@@ -262,149 +288,13 @@ func loadPolicy(path string) (policy.Policy, error) {
 	return p, p.Validate()
 }
 
-func systemctl(args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), systemctlTimeout)
-	defer cancel()
-	_, err := systemctlOutput(ctx, args...)
-	return err
-}
-
-func systemctlOutput(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "systemctl", append([]string{"--user"}, args...)...)
-	cmd.WaitDelay = time.Second
-	for _, key := range []string{"HOME", "PATH", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"} {
-		if v, ok := os.LookupEnv(key); ok {
-			cmd.Env = append(cmd.Env, key+"="+v)
-		}
-	}
-	output, err := cmd.Output()
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	return output, err
-}
-
-type userUnitState struct {
-	load, active string
-}
-
-// A missing file is not evidence that the manager has stopped its service.
-// Require a successful structured query; never infer absence from an exit code
-// or a localized diagnostic (including connection/authorization failures).
-func inspectUserUnit(ctx context.Context) (userUnitState, error) {
-	output, err := systemctlOutput(ctx, "show", "--property=LoadState", "--property=ActiveState", companionUnit)
-	if err != nil {
-		return userUnitState{}, err
-	}
-	var state userUnitState
-	for _, line := range strings.Split(strings.TrimSuffix(string(output), "\n"), "\n") {
-		key, value, ok := strings.Cut(line, "=")
-		if !ok || value == "" {
-			return userUnitState{}, errors.New("invalid unit properties")
-		}
-		switch key {
-		case "LoadState":
-			if state.load != "" {
-				return userUnitState{}, errors.New("duplicate unit property")
-			}
-			state.load = value
-		case "ActiveState":
-			if state.active != "" {
-				return userUnitState{}, errors.New("duplicate unit property")
-			}
-			state.active = value
-		default:
-			return userUnitState{}, errors.New("unexpected unit property")
-		}
-	}
-	if state.load == "" || state.active == "" {
-		return userUnitState{}, errors.New("missing unit property")
-	}
-	return state, nil
-}
-
-func (s userUnitState) absent() bool {
-	return s.load == "not-found" && s.quiescent()
-}
-
-func (s userUnitState) quiescent() bool {
-	// systemd preserves failed after a successful stop; failed is an
-	// inactive state, not evidence of a still-running service.
-	return s.active == "inactive" || s.active == "failed"
-}
-
-func stopUserUnit(ctx context.Context) error {
-	state, err := inspectUserUnit(ctx)
-	if err != nil {
-		return err
-	}
-	if state.absent() {
-		// systemd 260 reports stop of a missing unit as exit 5. There is no
-		// stop to perform only when the reachable manager confirms quiescence.
-		return nil
-	}
-	if _, err := systemctlOutput(ctx, "stop", companionUnit); err != nil {
-		return err
-	}
-	state, err = inspectUserUnit(ctx)
-	if err != nil {
-		return err
-	}
-	if !state.quiescent() || (state.load != "loaded" && !state.absent()) {
-		return errors.New("unit not confirmed inactive")
-	}
-	return nil
-}
-
-func disableUserUnit(ctx context.Context, unitPath string) error {
-	if _, err := os.Lstat(unitPath); os.IsNotExist(err) {
-		state, err := inspectUserUnit(ctx)
-		if err != nil {
-			return err
-		}
-		if state.absent() {
-			// disable of a missing unit exits 1, indistinguishable from other
-			// failures. Skip the operation only with affirmative absence.
-			return nil
-		}
-	} else if err != nil {
-		return err
-	}
-	_, err := systemctlOutput(ctx, "disable", companionUnit)
-	return err
-}
-
-func installUnit(path, dir string) error {
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil || strings.ContainsAny(exe+dir, "\n\r%\"\\") {
-		return errors.New("unsupported service path")
-	}
-	content := "[Unit]\nDescription=souls.house Companion\nAfter=network-online.target\n\n[Service]\nType=simple\n" +
-		fmt.Sprintf("ExecStart=\"%s\" serve --state-dir \"%s\"\n", exe, dir) +
-		"Environment=PATH=/usr/local/bin:/usr/bin:/bin\nRestart=on-failure\nRestartSec=10\nUMask=0077\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target\n"
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	if old, err := os.Lstat(path); err == nil && !old.Mode().IsRegular() {
-		return errors.New("unit must be a regular file")
-	}
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
-		return err
-	}
-	if err := systemctl("daemon-reload"); err != nil {
-		return err
-	}
-	return systemctl("enable", "souls-house-companion.service")
-}
-
 func serve(dir, unit string) error {
 	state, err := client.Load(dir)
-	if err != nil {
-		return err
+	if idle, idleErr := idleBeforeServe(state, err); idle || idleErr != nil {
+		if idle {
+			fmt.Fprintln(os.Stderr, "companion: not enrolled or uninstalled; waiting for explicit enrollment/resume")
+		}
+		return idleErr
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -420,7 +310,7 @@ func serve(dir, unit string) error {
 	if err != nil {
 		return err
 	}
-	handler := &service.Handler{ProtectedPaths: protectedPaths}
+	handler := &service.Handler{ProtectedPaths: protectedPaths, ExecuteLifecycle: state.ExecuteLifecycle}
 	c := client.New(handler)
 	c.Save = func(s client.State) error { return client.Save(dir, s) }
 	for ctx.Err() == nil {
@@ -461,7 +351,7 @@ func serve(dir, unit string) error {
 				return err
 			}
 			current, err := client.Load(dir)
-			if err != nil || current.Paused || !reflect.DeepEqual(current.Ceiling, state.Ceiling) {
+			if err != nil || current.Paused || current.ExecuteLifecycle != state.ExecuteLifecycle || !reflect.DeepEqual(current.Ceiling, state.Ceiling) {
 				return errors.New("local authority changed")
 			}
 			return nil
@@ -490,24 +380,6 @@ func serve(dir, unit string) error {
 // not just its current unit file. CaptureProtected requires existing identities:
 // prepare missing directories locally before exposing any remote file tools.
 // Existing modes are not changed; symlink/non-directory targets fail closed.
-func prepareProtectedPaths(home, dir, unit, exe string) ([]string, error) {
-	serviceDir := filepath.Dir(filepath.Dir(unit))
-	environmentDir := filepath.Join(home, ".config/environment.d")
-	for _, path := range []string{serviceDir, environmentDir} {
-		if err := os.MkdirAll(path, 0700); err != nil {
-			return nil, err
-		}
-		info, err := os.Lstat(path)
-		if err != nil {
-			return nil, err
-		}
-		if !info.IsDir() {
-			return nil, errors.New("protected configuration must be a directory")
-		}
-	}
-	return []string{dir, filepath.Join(dir, "state.json"), unit, exe, serviceDir, environmentDir}, nil
-}
-
 func locallyGranted(p policy.Policy, key string) bool {
 	for _, resident := range p.Residents {
 		for _, grant := range resident.Volumes {
