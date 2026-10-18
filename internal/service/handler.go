@@ -103,6 +103,8 @@ func (h *Handler) handle(ctx context.Context, request client.Request, ceiling po
 			"stdout_truncated": result.StdoutTruncated, "stderr_truncated": result.StderrTruncated,
 			"execute_lifecycle":            runner.Lifecycle,
 			"possible_escaped_descendants": result.PossibleEscapedDescendants,
+			"possible_escaped_candidates":  result.PossibleEscapedCandidates,
+			"escape_candidates_truncated":  result.EscapeCandidatesTruncated,
 			"escape_scan_unavailable":      result.EscapeScanUnavailable})
 		return data, "json", err
 	}

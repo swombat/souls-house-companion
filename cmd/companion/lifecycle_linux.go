@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/swombat/souls-house-companion/internal/client"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 )
 
 const companionUnit = "souls-house-companion.service"
+
+func idleBeforeServe(_ client.State, err error) (bool, error) { return false, err }
 
 func addPlatformStatus(_ map[string]any) {}
 func platformDiagnostic(_ error) string {

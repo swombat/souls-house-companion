@@ -8,6 +8,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"github.com/swombat/souls-house-companion/internal/client"
 	"io"
 	"os"
 	"os/exec"
@@ -19,6 +20,16 @@ import (
 )
 
 const companionLabel = "house.souls.companion"
+
+func idleBeforeServe(state client.State, err error) (bool, error) {
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	} // corrupt/unsafe state remains a failure
+	return state.Uninstalled || state.DeviceID == "" || state.Credential == "", nil
+}
 
 type launchctlError struct {
 	operation string

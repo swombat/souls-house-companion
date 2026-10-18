@@ -4,6 +4,7 @@ package service
 
 import (
 	"errors"
+	"github.com/swombat/souls-house-companion/internal/linuxfs"
 	"github.com/swombat/souls-house-companion/internal/runner"
 	"syscall"
 	"testing"
@@ -25,5 +26,9 @@ func TestDarwinExecuteContractVersionAndPermissionReceipt(t *testing.T) {
 	_, _, err = platformResult(nil, "json", ErrDenied)
 	if !errors.Is(err, ErrDenied) {
 		t.Fatal("grant refusal mislabelled TCC")
+	}
+	data, _, err = platformResult(nil, "json", errors.Join(linuxfs.ErrQuarantine, syscall.EACCES))
+	if err != nil || string(data) != `{"status":"operation_denied","operation_error":"invalid_quarantine"}` {
+		t.Fatal("quarantine reason masked by OS permission error")
 	}
 }

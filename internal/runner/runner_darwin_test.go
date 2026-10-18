@@ -5,6 +5,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"golang.org/x/sys/unix"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,6 +14,26 @@ import (
 	"testing"
 	"time"
 )
+
+func TestDarwinEscapeCandidatesCappedAndOtherJobsExcluded(t *testing.T) {
+	start := time.Unix(1000, 0)
+	procs := make([]unix.KinfoProc, 22)
+	for i := range procs {
+		procs[i].Proc.P_pid = int32(i + 100)
+		procs[i].Proc.P_starttime.Sec = 1001
+		procs[i].Eproc.Pgid = int32(i + 100)
+		procs[i].Eproc.Ppid = 1
+		procs[i].Eproc.Ucred.Uid = 42
+		copy(procs[i].Proc.P_comm[:], []byte("fixture"))
+	}
+	candidates, total, remaining := escapeCandidates(procs, 42, 999, 888, 0, start, start.Add(2*time.Second), map[int]bool{100: true})
+	if total != 21 || len(candidates) != 16 || remaining {
+		t.Fatal("candidate count/cap/exclusion wrong")
+	}
+	if candidates[0].PID != 101 || candidates[0].Comm != "fixture" || candidates[0].PPID != 1 {
+		t.Fatal("candidate identity receipt missing")
+	}
+}
 
 func TestDarwinExplicitInputAndScrubbedEnvironment(t *testing.T) {
 	t.Setenv("COMPANION_TEST_SECRET", "must-not-inherit")

@@ -42,8 +42,9 @@ The installed plist can load at the next login.
 5. `pause` durably denies before stopping; `resume` starts/reconnects.
    Status distinguishes owner-disabled Login Items from manager uncertainty.
    macOS 13+ may show “Background Items Added”; the owner may disable it.
-   The companion never overrides that choice. It restarts on failure, not on
-   a successful pause.
+  The companion never overrides that choice. It restarts on failure, not on
+   a successful pause. Missing/unenrolled/uninstalled state exits successfully
+   at login instead of entering a restart loop.
 
 TCC may deny Documents/Desktop/Downloads, removable/network volumes and iCloud.
 A background agent cannot show an interactive prompt. EPERM/EACCES receipts
@@ -71,8 +72,11 @@ than Linux cgroups, not containment.
 A best-effort same-UID process-table sweep detects possible remaining group
 members, newly started session members and newly reparented processes during
 the operation. It may miss escapes or count unrelated apps. It never kills
-ambiguous orphans. `possible_escaped_descendants` and `escape_scan_unavailable`
-are detection receipts, never proof of containment.
+ambiguous orphans. Receipts include at most 16 `possible_escaped_candidates`
+(pid/pgid/ppid/comm/start time), the total count and a truncation flag; other
+live companion jobs' pgids are excluded. These and `escape_scan_unavailable`
+are detection receipts, never proof of containment. Never copy candidate
+process names into audit logs.
 
 Without this exact per-install local opt-in, execute is refused before input
 download; read/write remain available:
@@ -87,6 +91,8 @@ A changed contract ID requires fresh acceptance. Local status and every remote
 execute receipt identify the weaker lifecycle. House's generic execute boolean
 is authority, **not a platform cleanup promise**. This is a reviewed preview
 boundary, not the final containment model.
+To revoke acceptance: pause, run `execute-lifecycle --revoke`, then resume.
+The service also checks unchanged acceptance immediately before delivery.
 
 ## Removal and rollback
 

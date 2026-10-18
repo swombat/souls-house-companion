@@ -62,8 +62,15 @@ request Full Disk Access. Do not retry with weaker path resolution.
   writer can substitute a device between metadata check and access open; the
   open itself may cause device-specific effects before post-open rejection.**
   `O_NONBLOCK` does not prevent all device-open effects. This is an explicitly
-  proposed nontransactional local-writer boundary requiring exact-head review, not Linux's stronger
+  accepted preview boundary (Lume, GePXae/YRzkrY), not Linux's stronger
   type-before-access-open guarantee or hostile-local-writer safety.
+  An ordinary same-user process cannot create device nodes with `mknod`; it can
+  substitute a FIFO, which NONBLOCK opens without hanging and post-open type
+  checks reject. A pre-existing same-volume device node created by root could
+  still be renamed into place by a local writer with the relevant authority.
+  Same-user processes already hold that user's local authority. The Mac test
+  plan includes an injected FIFO swap precisely between check and access-open,
+  expecting rejection without a hang; it is not runtime-proven by compilation.
 * Transfer copies at most `MaxWriteBytes`, publishes through no-replacement
   create, and rechecks source identity/size/mtime/ctime. A move attempts source
   unlink only after successful publication and another exact source recheck.

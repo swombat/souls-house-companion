@@ -59,6 +59,8 @@ type Result struct {
 	ExitCode                         int
 	PossibleEscapedDescendants       int
 	EscapeScanUnavailable            bool
+	PossibleEscapedCandidates        []EscapeCandidate
+	EscapeCandidatesTruncated        bool
 }
 
 // Execute uses only the current UID's ordinary user manager at /run/user/UID.

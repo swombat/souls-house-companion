@@ -9,10 +9,46 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/swombat/souls-house-companion/internal/volumes"
 	"golang.org/x/sys/unix"
 )
+
+func TestDarwinFIFOReplacementBetweenCheckAndAccessOpen(t *testing.T) {
+	dir := darwinFixture(t)
+	path := filepath.Join(dir, "file")
+	darwinFile(t, path, "fixture")
+	root := darwinRoot(t, dir)
+	h, err := root.lookup("file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.close()
+	start := time.Now()
+	fd, _, err := root.accessFileUsing(h, unix.O_RDONLY, false, func(parent int, name string, flags int, mode uint32) (int, error) {
+		if flags&unix.O_NONBLOCK == 0 {
+			t.Fatal("FIFO open can block")
+		}
+		if e := os.Remove(path); e != nil {
+			t.Fatal(e)
+		}
+		if e := unix.Mkfifo(path, 0600); e != nil {
+			t.Fatal(e)
+		}
+		return unix.Openat(parent, name, flags, mode)
+	})
+	if fd >= 0 {
+		unix.Close(fd)
+		t.Fatal("FIFO admitted as regular file")
+	}
+	if !errors.Is(err, ErrTargetChanged) {
+		t.Fatalf("replacement not rejected: %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("FIFO replacement hung")
+	}
+}
 
 // Resolve only the freshly created fixture's trusted absolute prefix: macOS
 // commonly supplies TMPDIR through /var -> /private/var. Engine inputs themselves

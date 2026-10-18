@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -44,7 +45,27 @@ type Result struct {
 	ExitCode                         int
 	PossibleEscapedDescendants       int
 	EscapeScanUnavailable            bool
+	PossibleEscapedCandidates        []EscapeCandidate
+	EscapeCandidatesTruncated        bool
 }
+
+var liveJobs = struct {
+	sync.Mutex
+	groups map[int]bool
+}{groups: make(map[int]bool)}
+
+func otherLiveGroups(own int) map[int]bool {
+	liveJobs.Lock()
+	defer liveJobs.Unlock()
+	out := make(map[int]bool, len(liveJobs.groups))
+	for group := range liveJobs.groups {
+		if group != own {
+			out[group] = true
+		}
+	}
+	return out
+}
+
 type boundedBuffer struct {
 	mu        sync.Mutex
 	buf       bytes.Buffer
@@ -122,6 +143,10 @@ func Execute(ctx context.Context, req Request) (Result, error) {
 		return result, ErrStart
 	}
 	pgid := cmd.Process.Pid
+	liveJobs.Lock()
+	liveJobs.groups[pgid] = true
+	liveJobs.Unlock()
+	defer func() { liveJobs.Lock(); delete(liveJobs.groups, pgid); liveJobs.Unlock() }()
 	var session uintptr
 	if p, e := unix.SysctlKinfoProc("kern.proc.pid", pgid); e == nil {
 		session = p.Eproc.Sess
@@ -167,22 +192,56 @@ func Execute(ctx context.Context, req Request) (Result, error) {
 	procs, scanErr := unix.SysctlKinfoProcSlice("kern.proc.all")
 	result.EscapeScanUnavailable = scanErr != nil
 	finished := time.Now()
-	for _, p := range procs {
-		if p.Eproc.Ucred.Uid != uint32(os.Getuid()) || int(p.Proc.P_pid) == os.Getpid() {
-			continue
-		}
-		start := time.Unix(p.Proc.P_starttime.Sec, int64(p.Proc.P_starttime.Usec)*1000)
-		member := int(p.Eproc.Pgid) == pgid ||
-			session != 0 && p.Eproc.Sess == session && !start.Before(started) && !start.After(finished)
-		possible := p.Eproc.Ppid == 1 && !start.Before(started) && !start.After(finished)
-		if member || possible {
-			result.PossibleEscapedDescendants++
-		}
-		if int(p.Eproc.Pgid) == pgid {
-			runErr = errors.Join(runErr, ErrCleanup)
-		}
+	var groupRemains bool
+	result.PossibleEscapedCandidates, result.PossibleEscapedDescendants, groupRemains =
+		escapeCandidates(procs, uint32(os.Getuid()), os.Getpid(), pgid, session, started, finished, otherLiveGroups(pgid))
+	result.EscapeCandidatesTruncated = result.PossibleEscapedDescendants > len(result.PossibleEscapedCandidates)
+	if groupRemains {
+		runErr = errors.Join(runErr, ErrCleanup)
 	}
 	result.Stdout, result.StdoutTruncated = out.snapshot()
 	result.Stderr, result.StderrTruncated = errOut.snapshot()
 	return result, runErr
+}
+
+func escapeCandidates(procs []unix.KinfoProc, uid uint32, ownPID, pgid int, session uintptr,
+	started, finished time.Time, excluded map[int]bool) ([]EscapeCandidate, int, bool) {
+	// Deterministic, capped receipt; never expose argv or environment.
+	slices.SortFunc(procs, func(a, b unix.KinfoProc) int {
+		if a.Proc.P_pid < b.Proc.P_pid {
+			return -1
+		}
+		if a.Proc.P_pid > b.Proc.P_pid {
+			return 1
+		}
+		return 0
+	})
+	out := make([]EscapeCandidate, 0, 16)
+	total := 0
+	groupRemains := false
+	for _, p := range procs {
+		group := int(p.Eproc.Pgid)
+		if p.Eproc.Ucred.Uid != uid || int(p.Proc.P_pid) == ownPID || excluded[group] {
+			continue
+		}
+		start := time.Unix(p.Proc.P_starttime.Sec, int64(p.Proc.P_starttime.Usec)*1000)
+		inWindow := !start.Before(started) && !start.After(finished)
+		member := group == pgid || session != 0 && p.Eproc.Sess == session && inWindow
+		possible := p.Eproc.Ppid == 1 && inWindow
+		if !member && !possible {
+			continue
+		}
+		total++
+		if group == pgid {
+			groupRemains = true
+		}
+		if len(out) < 16 {
+			comm := p.Proc.P_comm[:]
+			if i := bytes.IndexByte(comm, 0); i >= 0 {
+				comm = comm[:i]
+			}
+			out = append(out, EscapeCandidate{int(p.Proc.P_pid), group, int(p.Eproc.Ppid), string(comm), start})
+		}
+	}
+	return out, total, groupRemains
 }

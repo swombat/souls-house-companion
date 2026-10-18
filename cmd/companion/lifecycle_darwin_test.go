@@ -5,10 +5,49 @@ package main
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
+	"github.com/swombat/souls-house-companion/internal/client"
+	"github.com/swombat/souls-house-companion/internal/runner"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestDarwinUnenrolledAndUninstalledServeExitCleanly(t *testing.T) {
+	dir := t.TempDir()
+	if err := serve(dir, "unused"); err != nil {
+		t.Fatal("missing state caused restart failure")
+	}
+	for _, state := range []client.State{{}, {Uninstalled: true, DeviceID: "fixture"}} {
+		if err := client.Save(dir, state); err != nil {
+			t.Fatal(err)
+		}
+		if err := serve(dir, "unused"); err != nil {
+			t.Fatal("idle state caused restart failure")
+		}
+	}
+	if _, err := idleBeforeServe(client.State{}, errors.New("corrupt state")); err == nil {
+		t.Fatal("corrupt state suppressed")
+	}
+}
+func TestDarwinLocalExecuteRevoke(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := client.Save(dir, client.State{ExecuteLifecycle: runner.Lifecycle}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"execute-lifecycle", "--revoke", "--state-dir", dir}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := client.Load(dir)
+	if err != nil || state.ExecuteLifecycle != "" {
+		t.Fatal("contract not revoked")
+	}
+	if idle, err := idleBeforeServe(client.State{}, os.ErrPermission); idle || err == nil {
+		t.Fatal("unsafe state treated as absent")
+	}
+}
 
 func TestDarwinPlistEscapingAndLifecycle(t *testing.T) {
 	data, err := launchAgentPlist("/Users/fixture/A&B/<binary>", "/Users/fixture/state & ceiling")

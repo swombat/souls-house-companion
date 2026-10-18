@@ -63,6 +63,7 @@ func run(args []string) error {
 	tokenStdin := flags.Bool("token-stdin", false, "read enrollment token from stdin")
 	user := flags.Bool("user", false, "install ordinary user unit only")
 	contract := flags.String("accept-contract", "", "explicit local acceptance of versioned execute lifecycle; see docs/macos.md")
+	revokeContract := flags.Bool("revoke", false, "revoke local execute lifecycle acceptance (pause first)")
 	_ = flags.Bool("json", false, "machine-readable status")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
@@ -108,14 +109,14 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "execute-lifecycle":
-		if *contract != runner.Lifecycle {
+		if (*revokeContract && *contract != "") || (!*revokeContract && *contract != runner.Lifecycle) {
 			return errors.New("exact lifecycle contract acceptance required")
 		}
 		state, err := client.Load(*dir)
 		if err != nil {
 			return err
 		}
-		state.ExecuteLifecycle = *contract
+		state.ExecuteLifecycle = *contract // --revoke leaves this empty
 		return client.Save(*dir, state)
 	case "uninstall":
 		if !*user {
@@ -289,8 +290,11 @@ func loadPolicy(path string) (policy.Policy, error) {
 
 func serve(dir, unit string) error {
 	state, err := client.Load(dir)
-	if err != nil {
-		return err
+	if idle, idleErr := idleBeforeServe(state, err); idle || idleErr != nil {
+		if idle {
+			fmt.Fprintln(os.Stderr, "companion: not enrolled or uninstalled; waiting for explicit enrollment/resume")
+		}
+		return idleErr
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -347,7 +351,7 @@ func serve(dir, unit string) error {
 				return err
 			}
 			current, err := client.Load(dir)
-			if err != nil || current.Paused || !reflect.DeepEqual(current.Ceiling, state.Ceiling) {
+			if err != nil || current.Paused || current.ExecuteLifecycle != state.ExecuteLifecycle || !reflect.DeepEqual(current.Ceiling, state.Ceiling) {
 				return errors.New("local authority changed")
 			}
 			return nil

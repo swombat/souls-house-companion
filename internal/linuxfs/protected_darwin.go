@@ -300,6 +300,13 @@ func (r *Root) lookup(path string) (*handle, error) {
 // read/written until all post-open checks pass. This deliberately documented
 // boundary is NOT hostile-local-namespace-writer containment.
 func (r *Root) accessFile(h *handle, flags int, single bool) (int, unix.Stat_t, error) {
+	return r.accessFileUsing(h, flags, single, unix.Openat)
+}
+
+// Per-call open seam exercises the documented check/open race without mutable
+// production hooks or a weaker fallback.
+func (r *Root) accessFileUsing(h *handle, flags int, single bool,
+	open func(int, string, int, uint32) (int, error)) (int, unix.Stat_t, error) {
 	var zero unix.Stat_t
 	if h.parent < 0 {
 		return -1, zero, ErrContainment
@@ -320,7 +327,7 @@ func (r *Root) accessFile(h *handle, flags int, single bool) (int, unix.Stat_t, 
 	if single && named.Nlink != 1 {
 		return -1, zero, ErrHardlinkMutation
 	}
-	fd, err := unix.Openat(h.parent, h.name, flags|unix.O_NOFOLLOW|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOCTTY, 0)
+	fd, err := open(h.parent, h.name, flags|unix.O_NOFOLLOW|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOCTTY, 0)
 	if errors.Is(err, unix.ELOOP) {
 		return -1, zero, ErrSymlink
 	}
