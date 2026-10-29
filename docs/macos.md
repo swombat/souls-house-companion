@@ -31,6 +31,9 @@ The installed plist can load at the next login.
 1. `souls-house-companion volumes` shows real OS UUID-based identities.
    APFS Data is distinct from sealed System (denied); a `/` grant cannot
    traverse the `/Users` firmlink. Use Data mount-relative `Users/name/...`.
+   Malformed or unexpected APFS volume-group metadata anywhere (including an
+   unusual external group) disables the shared-device exception and can deny
+   Data too; this is a fail-closed discovery refusal, not a privacy approval.
 2. The house owner/admin creates a fresh one-use grant for this Mac and the
    selected residents. Never remint/reuse the Dell's consumed grant. Save an
    independent local ceiling JSON (docs/s1.md, docs/s2.md).
