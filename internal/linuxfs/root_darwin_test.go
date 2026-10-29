@@ -272,14 +272,14 @@ func TestDarwinBoundaryMismatchAndInvalidation(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Simulate a changed filesystem identity between initial check and walk.
-		r.rootFS.Val[0] ^= 1
+		r.rootID.fsid.Val[0] ^= 1
 		if _, err := r.walk("file", true); !errors.Is(err, unix.EXDEV) {
 			t.Fatalf("fsid mismatch: %v", err)
 		}
 	})
 	t.Run("device", func(t *testing.T) {
 		r := darwinRoot(t, dir)
-		r.rootID.dev ^= 1
+		r.rootDev ^= 1
 		if _, err := r.walk("file", true); !errors.Is(err, unix.EXDEV) {
 			t.Fatalf("device mismatch: %v", err)
 		}

@@ -91,9 +91,12 @@ func (r *Root) mutationLeaf(parent int, name string) (*handle, error) {
 	}
 	h := &handle{fd: fd, parent: pfd, name: name}
 	if err = unix.Fstat(fd, &h.st); err == nil {
+		h.id, err = identity(fd, &h.st)
+	}
+	if err == nil {
 		err = h.check(r)
 	}
-	if err == nil && identity(&h.st) == r.rootID {
+	if err == nil && h.id == r.rootID {
 		err = ErrRootMutation
 	}
 	if err != nil {
@@ -133,7 +136,7 @@ func (p *mutationPath) recheck(r *Root, ctx context.Context) error {
 		return err
 	}
 	defer h.close()
-	if p.target == nil || identity(&h.st) != identity(&p.target.st) {
+	if p.target == nil || h.id != p.target.id {
 		return ErrTargetChanged
 	}
 	if h.st.Mode&unix.S_IFMT == unix.S_IFREG && h.st.Nlink != 1 {
@@ -256,6 +259,10 @@ func (r *Root) atomicWrite(ctx context.Context, p *mutationPath, data []byte, mo
 	out.Pending = strings.TrimSuffix(p.path, p.name) + name
 	var staged unix.Stat_t
 	statErr := unix.Fstat(fd, &staged)
+	var stagedID inode
+	if statErr == nil {
+		stagedID, statErr = identity(fd, &staged)
+	}
 	// Cleanup is deliberately skipped if the staging identity was never known.
 	defer func() {
 		if out.Pending == "" || statErr != nil {
@@ -265,7 +272,7 @@ func (r *Root) atomicWrite(ctx context.Context, p *mutationPath, data []byte, mo
 		if err == nil {
 			defer h.close()
 			err = p.parent.check(r)
-			if err == nil && (identity(&h.st) != identity(&staged) || h.st.Nlink != 1) {
+			if err == nil && (h.id != stagedID || h.st.Nlink != 1) {
 				err = ErrTargetChanged
 			}
 			if err == nil {
@@ -295,7 +302,11 @@ func (r *Root) atomicWrite(ctx context.Context, p *mutationPath, data []byte, mo
 		if err := unix.Fstat(fd, &current); err != nil {
 			return out, err
 		}
-		if identity(&current) != identity(&staged) || current.Mode&unix.S_IFMT != unix.S_IFREG {
+		currentID, err := identity(fd, &current)
+		if err != nil {
+			return out, err
+		}
+		if currentID != stagedID || current.Mode&unix.S_IFMT != unix.S_IFREG {
 			return out, ErrTargetChanged
 		}
 		if current.Nlink != 1 {
@@ -330,7 +341,7 @@ func (r *Root) atomicWrite(ctx context.Context, p *mutationPath, data []byte, mo
 		return out, err
 	}
 	defer h.close()
-	if identity(&h.st) != identity(&staged) || h.st.Nlink != 1 {
+	if h.id != stagedID || h.st.Nlink != 1 {
 		return out, ErrTargetChanged
 	}
 	if err := ctx.Err(); err != nil {
@@ -371,7 +382,7 @@ func (r *Root) renameFile(ctx context.Context, source, destination string, quara
 	if dst.target != nil {
 		return Mutation{}, unix.EEXIST
 	}
-	if quarantine != nil && identity(&dst.parent.st) != identity(&quarantine.st) {
+	if quarantine != nil && dst.parent.id != quarantine.id {
 		return Mutation{}, ErrTargetChanged
 	}
 	if err := src.recheck(r, ctx); err != nil {
@@ -402,7 +413,11 @@ func (r *Root) checkQuarantine(h *handle) error {
 	if err := unix.Fstat(h.fd, &st); err != nil {
 		return err
 	}
-	if identity(&st) == r.rootID || st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Uid != uint32(unix.Geteuid()) || st.Mode&07777 != 0700 {
+	id, err := identity(h.fd, &st)
+	if err != nil {
+		return err
+	}
+	if id == r.rootID || st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Uid != uint32(unix.Geteuid()) || st.Mode&07777 != 0700 {
 		return ErrQuarantine
 	}
 	// Kernel effective-access check against the pinned directory's "."; ACLs

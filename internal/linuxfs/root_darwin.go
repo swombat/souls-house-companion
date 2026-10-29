@@ -44,7 +44,7 @@ type Root struct {
 	fd         int
 	ready      bool
 	rootID     inode
-	rootFS     unix.Fsid
+	rootDev    int32
 	pins       []int
 	identities map[inode]bool
 	protected  []string
@@ -88,7 +88,7 @@ func openRoot(path string, protected []string, identities *Protected) (*Root, er
 		r.Close()
 		return nil, err
 	}
-	r.rootID, r.rootFS = identity(&st), fs.Fsid
+	r.rootID, r.rootDev = inode{fs.Fsid, st.Ino}, st.Dev
 	if err = r.copyProtected(identities); err != nil {
 		r.Close()
 		return nil, err

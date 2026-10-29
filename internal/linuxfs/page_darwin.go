@@ -20,8 +20,8 @@ type directoryVersion struct {
 	mtime, ctime unix.Timespec
 }
 
-func version(st *unix.Stat_t) directoryVersion {
-	return directoryVersion{identity(st), st.Mtim, st.Ctim}
+func version(id inode, st *unix.Stat_t) directoryVersion {
+	return directoryVersion{id, st.Mtim, st.Ctim}
 }
 
 // ListCursor is immutable and opaque, not a serialized capability. The caller
@@ -58,7 +58,7 @@ func (r *Root) ListPage(ctx context.Context, path string, cursor *ListCursor, li
 	if h.st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return Page{}, unix.ENOTDIR
 	}
-	dir := version(&h.st)
+	dir := version(h.id, &h.st)
 	offset := 0
 	if cursor != nil {
 		if cursor.path != path || cursor.root != r.rootID || cursor.dir != dir || cursor.offset < 0 {
@@ -80,7 +80,11 @@ func (r *Root) ListPage(ctx context.Context, path string, cursor *ListCursor, li
 	if err := unix.Fstat(fd, &opened); err != nil {
 		return Page{}, err
 	}
-	if identity(&opened) != identity(&h.st) || version(&opened) != dir {
+	openedID, err := identity(fd, &opened)
+	if err != nil {
+		return Page{}, err
+	}
+	if version(openedID, &opened) != dir {
 		return Page{}, ErrDirectoryChanged
 	}
 	if err := r.checkDirectory(fd); err != nil {
@@ -129,7 +133,11 @@ func (r *Root) ListPage(ctx context.Context, path string, cursor *ListCursor, li
 	if err := unix.Fstat(h.fd, &after); err != nil {
 		return Page{}, err
 	}
-	if version(&after) != dir {
+	afterID, err := identity(h.fd, &after)
+	if err != nil {
+		return Page{}, err
+	}
+	if version(afterID, &after) != dir {
 		return Page{}, ErrDirectoryChanged
 	}
 	if err := ctx.Err(); err != nil {

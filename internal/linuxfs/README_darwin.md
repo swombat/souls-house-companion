@@ -24,6 +24,33 @@ pins deny hardlink, case-insensitive and Unicode-normalization aliases, and
 protected directory ancestors survive renames. Protected ancestors above the
 shared root are also checked, including if the shared root moves.
 
+### Measured APFS volume-group behaviour
+
+On native arm64 macOS 26.6.2 (25G83), System and Data report the same `st_dev`
+but distinct `fstatfs` FSIDs and real fd-derived UUIDs. Lume independently
+measured Data's root inode as `0x0FFFFFFF00000002`; the volume group remaps
+inodes to keep them unique in its shared device namespace. `/Users/...` and
+`/System/Volumes/Data/Users/...` refer to the same Data objects.
+
+Protected and retained identities are therefore `(fd fstatfs FSID, inode)`,
+not `(st_dev, inode)`. Device equality alone neither merges volumes nor proves
+containment. Every boundary still checks its own root's device **and** FSID.
+The native firmlink test isolates FSID refusal with equal device values; a
+temporary overlay removing only the FSID comparison must turn that test red.
+An explicit home-fixture test checks both protection-alias directions, alongside
+the case/NFC/NFD tests. Different future macOS topology produces a visible
+failure or explicit skip, not an inferred grant.
+
+Volume discovery rejects duplicate UUIDs/FSIDs. Shared device numbers remain
+denied except for exactly two APFS members with distinct UUIDs/FSIDs, a sealed
+ROOTFS System and writable non-root Data, with matching OS-reported role/group
+metadata. There is no public `ATTR_VOL_*` role attribute; bounded, scrubbed
+`diskutil apfs listVolumeGroups -plist` supplies roles/group membership, never
+identity UUIDs. A sealed System snapshot's separate fd-derived UUID must match
+`diskutil info -plist`'s exact snapshot/volume UUID and group ID. Missing,
+ambiguous or mismatched metadata denies the exception. No path spelling grants
+a role. Persisted keys still exclude ephemeral FSIDs and device numbers.
+
 `OpenVerified` requires an exact fresh allowed volume row, delegates retained-fd
 UUID/root binding to `volumes.VerifyFD`, owns its own mount snapshot, then
 validates it. Keys are volume-helper policy (UUID + root + mount path), not

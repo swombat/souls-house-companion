@@ -5,6 +5,8 @@ package volumes
 import (
 	"os"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // TestDarwinAcceptanceSystemDataEvidence reports topology evidence, not approval.
@@ -33,6 +35,21 @@ func TestDarwinAcceptanceSystemDataEvidence(t *testing.T) {
 		selected[row.Point] = evidence{row, fd, probeErr == nil && fd.uuid != ""}
 	}
 	root, data := selected["/"], selected["/System/Volumes/Data"]
+	roles := systemAPFSRoles()
+	for point, e := range selected {
+		e.fd.role = roles[e.fd.uuid]
+		if e.fd.role.role == "" {
+			e.fd.role = snapshotAPFSRole(e.row, e.fd.uuid, roles)
+		}
+		selected[point] = e
+	}
+	root, data = selected["/"], selected["/System/Volumes/Data"]
+	t.Logf("role_records=%d system_role_matches=%t data_role_matches=%t group_matches=%t system_rootflag=%t system_sealed=%t data_writable_nonroot=%t",
+		len(roles), root.fd.role.role == "System", data.fd.role.role == "Data",
+		root.fd.role.group != "" && root.fd.role.group == data.fd.role.group,
+		root.row.Flags&unix.MNT_ROOTFS != 0,
+		root.row.Flags&(unix.MNT_RDONLY|unix.MNT_SNAPSHOT) != 0,
+		data.row.Flags&(unix.MNT_ROOTFS|unix.MNT_RDONLY|unix.MNT_SNAPSHOT) == 0)
 	t.Logf("system_evidence_available=%t data_evidence_available=%t", root.ok, data.ok)
 	if root.ok && data.ok {
 		t.Logf("equal_st_dev=%t equal_fsid=%t equal_uuid=%t",

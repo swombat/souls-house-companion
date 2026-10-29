@@ -206,6 +206,7 @@ type darwinEvidence struct {
 	dev  int32
 	ino  uint64
 	uuid string
+	role apfsRole
 }
 
 func probeDarwinRoot(row darwinRow) (darwinEvidence, error) {
@@ -250,7 +251,8 @@ func inspectDarwinRoot(fd int, row darwinRow, uuid func(int) (string, error)) (d
 }
 
 // discoverDarwin retains denied rows. Duplicate FSIDs, mountpoints, actual
-// st_devs or UUIDs all fail closed (including visible cloned volumes).
+// UUIDs fail closed (including visible cloned volumes). Shared st_dev is
+// allowed only for a role-proven System/Data pair in one APFS volume group.
 func discoverDarwin(rows []darwinRow, probe func(darwinRow) (darwinEvidence, error)) []Mount {
 	mounts := make([]Mount, len(rows))
 	ids := map[uint64]int{}
@@ -259,7 +261,7 @@ func discoverDarwin(rows []darwinRow, probe func(darwinRow) (darwinEvidence, err
 		ids[darwinID(r)]++
 		points[r.Point]++
 	}
-	devs := map[int32]int{}
+	devs := map[int32][]int{}
 	uuids := map[string]int{}
 	evidence := make([]darwinEvidence, len(rows))
 	for i, r := range rows {
@@ -277,12 +279,12 @@ func discoverDarwin(rows []darwinRow, probe func(darwinRow) (darwinEvidence, err
 				evidence[i] = e
 				m.Device = strconv.FormatInt(int64(e.dev), 10)
 				m.UUID = e.uuid
-				devs[e.dev]++
+				devs[e.dev] = append(devs[e.dev], i)
 				uuids[e.uuid]++
 				// The sealed System snapshot is not a writable grant root.
 				// Still retain actual device evidence for the Data separation
 				// check; denying System must not implicitly deny Data.
-				if r.Filesystem == "apfs" && r.Point == "/" &&
+				if r.Filesystem == "apfs" && r.Flags&unix.MNT_ROOTFS != 0 &&
 					r.Flags&(unix.MNT_RDONLY|unix.MNT_SNAPSHOT) != 0 {
 					m.Denied = "read-only or snapshot APFS System volume"
 				}
@@ -292,28 +294,10 @@ func discoverDarwin(rows []darwinRow, probe func(darwinRow) (darwinEvidence, err
 	}
 	for i := range mounts {
 		m := &mounts[i]
-		if m.Denied == "" && (devs[evidence[i].dev] != 1 || uuids[m.UUID] != 1) {
+		if m.Denied == "" && (uuids[m.UUID] != 1 ||
+			(len(devs[evidence[i].dev]) > 1 && !sharedAPFSGroup(rows, evidence, devs[evidence[i].dev]))) {
 			m.Denied = "ambiguous device or cloned volume UUID"
 		}
-	}
-	// APFS's rootfs and Data are distinct mount identities. Never treat '/'
-	// and '/System/Volumes/Data' as aliases just because firmlinks expose Data
-	// through '/Users', '/private', etc. If a Data row is present, both must
-	// have actual, distinct st_dev evidence. Failure denies both, not a guessed
-	// topology. Confinement must reject every subsequent st_dev transition.
-	root, data := -1, -1
-	for i, m := range mounts {
-		if m.Filesystem == "apfs" && m.Mountpoint == "/" {
-			root = i
-		}
-		if m.Filesystem == "apfs" && m.Mountpoint == "/System/Volumes/Data" {
-			data = i
-		}
-	}
-	if root >= 0 && data >= 0 &&
-		(evidence[root].uuid == "" || evidence[data].uuid == "" || evidence[root].dev == evidence[data].dev) {
-		mounts[root].Denied = "APFS rootfs/Data device separation unavailable"
-		mounts[data].Denied = "APFS rootfs/Data device separation unavailable"
 	}
 	for i := range mounts {
 		m := &mounts[i]
@@ -326,12 +310,39 @@ func discoverDarwin(rows []darwinRow, probe func(darwinRow) (darwinEvidence, err
 	return mounts
 }
 
+func sharedAPFSGroup(rows []darwinRow, evidence []darwinEvidence, members []int) bool {
+	if len(members) != 2 {
+		return false
+	}
+	a, b := members[0], members[1]
+	if evidence[a].role.role == "Data" {
+		a, b = b, a
+	}
+	system, data := evidence[a], evidence[b]
+	return rows[a].Filesystem == "apfs" && rows[b].Filesystem == "apfs" &&
+		system.role.role == "System" && data.role.role == "Data" &&
+		system.role.group != "" && system.role.group == data.role.group &&
+		system.uuid != "" && data.uuid != "" && system.uuid != data.uuid &&
+		rows[a].FSID != rows[b].FSID &&
+		rows[a].Flags&unix.MNT_ROOTFS != 0 &&
+		rows[a].Flags&(unix.MNT_RDONLY|unix.MNT_SNAPSHOT) != 0 &&
+		rows[b].Flags&(unix.MNT_ROOTFS|unix.MNT_RDONLY|unix.MNT_SNAPSHOT) == 0
+}
+
 func LoadSystem() ([]Mount, *Snapshot, error) {
 	s, err := SnapshotCurrent()
 	if err != nil {
 		return nil, nil, err
 	}
-	mounts := discoverDarwin(s.rows, probeDarwinRoot)
+	roles := systemAPFSRoles()
+	mounts := discoverDarwin(s.rows, func(row darwinRow) (darwinEvidence, error) {
+		e, err := probeDarwinRoot(row)
+		e.role = roles[e.uuid]
+		if err == nil && e.role.role == "" {
+			e.role = snapshotAPFSRole(row, e.uuid, roles)
+		}
+		return e, err
+	})
 	if err := s.Validate(); err != nil {
 		s.Close()
 		return nil, nil, err

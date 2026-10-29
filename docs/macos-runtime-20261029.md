@@ -43,6 +43,16 @@ The original candidate archive remains unchanged.
 
 ## Remaining gates
 
+### Follow-up after Lume's identity ruling
+
+Lume accepted the three-fix delta at c5b00cc and independently confirmed the
+shared-device measurement. The subsequent coherent correction uses FSID-qualified
+protected identities and the narrowly role/group-qualified shared-device
+exception described in `internal/linuxfs/README_darwin.md`. Actual volume
+discovery now passes on this Mac; the final all-package and alias/FSID-red
+receipts accompany the next exact-head review. This supersedes the initial
+identity blocker above, not the installation/enrollment gates below.
+
 The Rails integration test is skipped without its dedicated fixture server.
 LaunchAgent bootstrap/pause/resume, owner-disabled state, next-login persistence,
 TCC/Gatekeeper context, fresh independently approved ceiling and owner enrollment,
