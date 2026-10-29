@@ -209,7 +209,7 @@ type darwinEvidence struct {
 }
 
 func probeDarwinRoot(row darwinRow) (darwinEvidence, error) {
-	fd, err := unix.Open(row.Point, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	fd, err := unix.Open(row.Point, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return darwinEvidence{}, err
 	}

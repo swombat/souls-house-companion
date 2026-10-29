@@ -28,7 +28,7 @@ func openAbsolute(path string, directory bool) (int, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.IndexByte(path, 0) >= 0 {
 		return -1, ErrInvalidPath
 	}
-	current, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+	current, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, err
 	}
@@ -327,7 +327,7 @@ func (r *Root) accessFileUsing(h *handle, flags int, single bool,
 	if single && named.Nlink != 1 {
 		return -1, zero, ErrHardlinkMutation
 	}
-	fd, err := open(h.parent, h.name, flags|unix.O_NOFOLLOW|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOCTTY, 0)
+	fd, err := open(h.parent, h.name, flags|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOCTTY, 0)
 	if errors.Is(err, unix.ELOOP) {
 		return -1, zero, ErrSymlink
 	}

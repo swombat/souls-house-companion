@@ -16,7 +16,13 @@ import (
 )
 
 func TestDarwinUnenrolledAndUninstalledServeExitCleanly(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := serve(dir, "unused"); err != nil {
+		t.Fatal("missing state directory caused restart failure")
+	}
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := serve(dir, "unused"); err != nil {
 		t.Fatal("missing state caused restart failure")
 	}
@@ -30,6 +36,12 @@ func TestDarwinUnenrolledAndUninstalledServeExitCleanly(t *testing.T) {
 	}
 	if _, err := idleBeforeServe(client.State{}, errors.New("corrupt state")); err == nil {
 		t.Fatal("corrupt state suppressed")
+	}
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := serve(dir, "unused"); err == nil {
+		t.Fatal("unsafe directory treated as idle")
 	}
 }
 func TestDarwinLocalExecuteRevoke(t *testing.T) {

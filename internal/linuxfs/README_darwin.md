@@ -7,7 +7,9 @@ Darwin fixtures must be run on a Mac; cross-compilation alone is not acceptance.
 ## Resolution and authority
 
 Every absolute root/protected component and every relative request component
-uses fd-relative `openat` with `O_NOFOLLOW | O_NOFOLLOW_ANY | O_CLOEXEC`.
+uses fd-relative `openat` with `O_NOFOLLOW_ANY | O_CLOEXEC`.
+`O_NOFOLLOW_ANY` already rejects symlinks including the leaf; Darwin rejects
+combining it with `O_NOFOLLOW` with `EINVAL` (verified on macOS 26.6.2).
 Unsupported flags fail closed; there is no pathname fallback. Directory opens
 also use `O_DIRECTORY`; metadata uses `O_EVTONLY`. No `F_GETPATH`, `/dev/fd`,
 symlink canonicalization, shell command, or path-prefix containment is used.
@@ -54,7 +56,7 @@ request Full Disk Access. Do not retry with weaker path resolution.
   existing singly linked regular target.
 * Reads/appends/transfer source reads reopen through a **pinned parent fd and
   one leaf name**, after checking its regular-file identity. Access opens use
-  `O_NOFOLLOW | O_NOFOLLOW_ANY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC`, never
+  `O_NOFOLLOW_ANY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC`, never
   `O_TRUNC`. The resulting fd's regular type, exact identity, FSID/device,
   protected identity and actual parent ancestry are checked before any data
   I/O. Append also rechecks single-link status before each bounded write.

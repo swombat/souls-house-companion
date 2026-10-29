@@ -248,7 +248,7 @@ func (r *Root) atomicWrite(ctx context.Context, p *mutationPath, data []byte, mo
 		return out, err
 	}
 	name := ".companion-write-" + hex.EncodeToString(nonce[:])
-	fd, err := unix.Openat(p.parent.fd, name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOCTTY, 0600)
+	fd, err := unix.Openat(p.parent.fd, name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOCTTY, 0600)
 	if err != nil {
 		return out, err
 	}

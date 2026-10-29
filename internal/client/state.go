@@ -113,7 +113,10 @@ func Lock(dir string) (*os.File, error) {
 
 func privateDirectory(dir string) error {
 	st, err := os.Lstat(dir)
-	if err != nil || !st.IsDir() || st.Mode().Perm()&0077 != 0 {
+	if err != nil {
+		return err // Preserve absence for Darwin's idle-before-enrollment path.
+	}
+	if !st.IsDir() || st.Mode().Perm()&0077 != 0 {
 		return errors.New("private state directory required")
 	}
 	if stat, ok := st.Sys().(*syscall.Stat_t); !ok || stat.Uid != uint32(os.Geteuid()) {

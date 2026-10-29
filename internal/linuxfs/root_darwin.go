@@ -174,7 +174,9 @@ func openComponent(parent int, name string, directory bool) (int, error) {
 	if directory {
 		flags = unix.O_RDONLY | unix.O_DIRECTORY
 	}
-	fd, err := unix.Openat(parent, name, flags|unix.O_NOFOLLOW|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOCTTY, 0)
+	// Darwin rejects O_NOFOLLOW combined with O_NOFOLLOW_ANY (EINVAL).
+	// ANY already forbids symlinks in every component, including the leaf.
+	fd, err := unix.Openat(parent, name, flags|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOCTTY, 0)
 	if errors.Is(err, unix.ELOOP) {
 		return -1, ErrSymlink
 	}

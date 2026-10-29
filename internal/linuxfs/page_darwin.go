@@ -114,7 +114,7 @@ func (r *Root) ListPage(ctx context.Context, path string, cursor *ListCursor, li
 			return Page{}, err
 		}
 		allowed, err := r.listedChild(h.fd, path, name)
-		if errors.Is(err, unix.EXDEV) {
+		if errors.Is(err, unix.EXDEV) || errors.Is(err, ErrFileType) {
 			out.Skipped++
 			continue
 		}
@@ -175,5 +175,8 @@ func (r *Root) listedChild(parent int, path, name string) (bool, error) {
 		return false, err
 	}
 	kind := st.Mode & unix.S_IFMT
-	return kind == unix.S_IFREG || kind == unix.S_IFDIR, nil
+	if kind != unix.S_IFREG && kind != unix.S_IFDIR {
+		return false, ErrFileType
+	}
+	return true, nil
 }
