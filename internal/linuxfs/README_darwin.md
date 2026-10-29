@@ -7,7 +7,9 @@ Darwin fixtures must be run on a Mac; cross-compilation alone is not acceptance.
 ## Resolution and authority
 
 Every absolute root/protected component and every relative request component
-uses fd-relative `openat` with `O_NOFOLLOW | O_NOFOLLOW_ANY | O_CLOEXEC`.
+uses fd-relative `openat` with `O_NOFOLLOW_ANY | O_CLOEXEC`.
+`O_NOFOLLOW_ANY` already rejects symlinks including the leaf; Darwin rejects
+combining it with `O_NOFOLLOW` with `EINVAL` (verified on macOS 26.6.2).
 Unsupported flags fail closed; there is no pathname fallback. Directory opens
 also use `O_DIRECTORY`; metadata uses `O_EVTONLY`. No `F_GETPATH`, `/dev/fd`,
 symlink canonicalization, shell command, or path-prefix containment is used.
@@ -21,6 +23,33 @@ Actual ancestry must reach the pinned root within 256 steps. Protected inode
 pins deny hardlink, case-insensitive and Unicode-normalization aliases, and
 protected directory ancestors survive renames. Protected ancestors above the
 shared root are also checked, including if the shared root moves.
+
+### Measured APFS volume-group behaviour
+
+On native arm64 macOS 26.6.2 (25G83), System and Data report the same `st_dev`
+but distinct `fstatfs` FSIDs and real fd-derived UUIDs. Lume independently
+measured Data's root inode as `0x0FFFFFFF00000002`; the volume group remaps
+inodes to keep them unique in its shared device namespace. `/Users/...` and
+`/System/Volumes/Data/Users/...` refer to the same Data objects.
+
+Protected and retained identities are therefore `(fd fstatfs FSID, inode)`,
+not `(st_dev, inode)`. Device equality alone neither merges volumes nor proves
+containment. Every boundary still checks its own root's device **and** FSID.
+The native firmlink test isolates FSID refusal with equal device values; a
+temporary overlay removing only the FSID comparison must turn that test red.
+An explicit home-fixture test checks both protection-alias directions, alongside
+the case/NFC/NFD tests. Different future macOS topology produces a visible
+failure or explicit skip, not an inferred grant.
+
+Volume discovery rejects duplicate UUIDs/FSIDs. Shared device numbers remain
+denied except for exactly two APFS members with distinct UUIDs/FSIDs, a sealed
+ROOTFS System and writable non-root Data, with matching OS-reported role/group
+metadata. There is no public `ATTR_VOL_*` role attribute; bounded, scrubbed
+`diskutil apfs listVolumeGroups -plist` supplies roles/group membership, never
+identity UUIDs. A sealed System snapshot's separate fd-derived UUID must match
+`diskutil info -plist`'s exact snapshot/volume UUID and group ID. Missing,
+ambiguous or mismatched metadata denies the exception. No path spelling grants
+a role. Persisted keys still exclude ephemeral FSIDs and device numbers.
 
 `OpenVerified` requires an exact fresh allowed volume row, delegates retained-fd
 UUID/root binding to `volumes.VerifyFD`, owns its own mount snapshot, then
@@ -54,7 +83,7 @@ request Full Disk Access. Do not retry with weaker path resolution.
   existing singly linked regular target.
 * Reads/appends/transfer source reads reopen through a **pinned parent fd and
   one leaf name**, after checking its regular-file identity. Access opens use
-  `O_NOFOLLOW | O_NOFOLLOW_ANY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC`, never
+  `O_NOFOLLOW_ANY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC`, never
   `O_TRUNC`. The resulting fd's regular type, exact identity, FSID/device,
   protected identity and actual parent ancestry are checked before any data
   I/O. Append also rechecks single-link status before each bounded write.

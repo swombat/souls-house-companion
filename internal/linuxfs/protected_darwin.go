@@ -11,9 +11,36 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type inode struct{ dev, ino uint64 }
+// st_dev is a consistency check, not a volume identity: Darwin volume groups
+// can expose distinct System/Data filesystems with the same device number.
+type inode struct {
+	fsid unix.Fsid
+	ino  uint64
+}
 
-func identity(st *unix.Stat_t) inode { return inode{uint64(st.Dev), st.Ino} }
+func identity(fd int, st *unix.Stat_t) (inode, error) {
+	var fs unix.Statfs_t
+	if err := unix.Fstatfs(fd, &fs); err != nil {
+		return inode{}, err
+	}
+	return inode{fs.Fsid, st.Ino}, nil
+}
+
+// namedIdentity rechecks the retained parent/name using its own no-follow fd.
+// A parent's FSID cannot stand in for the leaf's (notably across firmlinks).
+func namedIdentity(parent int, name string) (unix.Stat_t, inode, error) {
+	var st unix.Stat_t
+	fd, err := openComponent(parent, name, false)
+	if err != nil {
+		return st, inode{}, err
+	}
+	defer unix.Close(fd)
+	if err := unix.Fstat(fd, &st); err != nil {
+		return st, inode{}, err
+	}
+	id, err := identity(fd, &st)
+	return st, id, err
+}
 
 // Protected owns event-only inode pins, including files outside the share.
 // Missing paths and symlinks fail closed. Protect individual file identities
@@ -28,7 +55,7 @@ func openAbsolute(path string, directory bool) (int, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.IndexByte(path, 0) >= 0 {
 		return -1, ErrInvalidPath
 	}
-	current, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+	current, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, err
 	}
@@ -82,8 +109,13 @@ func (r *Root) addPin(fd int) error {
 		unix.Close(fd)
 		return ErrSymlink
 	}
+	id, err := identity(fd, &st)
+	if err != nil {
+		unix.Close(fd)
+		return err
+	}
 	r.pins = append(r.pins, fd)
-	r.identities[identity(&st)] = true
+	r.identities[id] = true
 	return nil
 }
 
@@ -111,15 +143,21 @@ func (r *Root) copyProtected(p *Protected) error {
 // Both fsid and st_dev must match, including on every actual-parent step.
 // APFS volumes, firmlinks and nested mounts are not treated as lexical children.
 func (r *Root) checkBoundary(fd int) error {
+	return r.checkBoundaryUsing(fd, unix.Fstat, unix.Fstatfs)
+}
+
+// Per-call syscall seam lets tests isolate FSID refusal even on hosts where
+// st_dev alone also refuses the firmlink; production always uses both checks.
+func (r *Root) checkBoundaryUsing(fd int, fstat func(int, *unix.Stat_t) error, fstatfs func(int, *unix.Statfs_t) error) error {
 	var st unix.Stat_t
 	var fs unix.Statfs_t
-	if err := unix.Fstat(fd, &st); err != nil {
+	if err := fstat(fd, &st); err != nil {
 		return err
 	}
-	if err := unix.Fstatfs(fd, &fs); err != nil {
+	if err := fstatfs(fd, &fs); err != nil {
 		return err
 	}
-	if uint64(st.Dev) != r.rootID.dev || fs.Fsid != r.rootFS {
+	if st.Dev != r.rootDev || fs.Fsid != r.rootID.fsid {
 		return unix.EXDEV
 	}
 	return nil
@@ -129,7 +167,11 @@ func (r *Root) checkLeaf(fd int, st *unix.Stat_t) error {
 	if err := r.checkBoundary(fd); err != nil {
 		return err
 	}
-	if r.identities[identity(st)] {
+	id, err := identity(fd, st)
+	if err != nil {
+		return err
+	}
+	if r.identities[id] {
 		return ErrProtected
 	}
 	if st.Mode&unix.S_IFMT == unix.S_IFLNK {
@@ -152,7 +194,10 @@ func (r *Root) checkDirectory(fd int) error {
 		if err := r.checkLeaf(current, &st); err != nil {
 			return err
 		}
-		id := identity(&st)
+		id, err := identity(current, &st)
+		if err != nil {
+			return err
+		}
 		if id == r.rootID {
 			return r.checkRootAncestors()
 		}
@@ -165,7 +210,12 @@ func (r *Root) checkDirectory(fd int) error {
 			unix.Close(parent)
 			return err
 		}
-		if identity(&pst) == id {
+		pid, err := identity(parent, &pst)
+		if err != nil {
+			unix.Close(parent)
+			return err
+		}
+		if pid == id {
 			unix.Close(parent)
 			return ErrContainment
 		}
@@ -189,7 +239,11 @@ func (r *Root) checkRootAncestors() error {
 		if err := unix.Fstat(current, &st); err != nil {
 			return err
 		}
-		if r.identities[identity(&st)] {
+		id, err := identity(current, &st)
+		if err != nil {
+			return err
+		}
+		if r.identities[id] {
 			return ErrProtected
 		}
 		parent, err := openComponent(current, "..", true)
@@ -201,7 +255,12 @@ func (r *Root) checkRootAncestors() error {
 			unix.Close(parent)
 			return err
 		}
-		if identity(&pst) == identity(&st) {
+		pid, err := identity(parent, &pst)
+		if err != nil {
+			unix.Close(parent)
+			return err
+		}
+		if pid == id {
 			unix.Close(parent)
 			return nil
 		}
@@ -225,6 +284,7 @@ type handle struct {
 	fd, parent int
 	name       string
 	st         unix.Stat_t
+	id         inode
 }
 
 func (h *handle) close() {
@@ -241,7 +301,11 @@ func (h *handle) check(r *Root) error {
 	if err := unix.Fstat(h.fd, &st); err != nil {
 		return err
 	}
-	if identity(&st) != identity(&h.st) {
+	id, err := identity(h.fd, &st)
+	if err != nil {
+		return err
+	}
+	if id != h.id {
 		return ErrContainment
 	}
 	if err := r.checkInode(h.fd, &st); err != nil {
@@ -253,11 +317,11 @@ func (h *handle) check(r *Root) error {
 		}
 		// Recheck the retained parent/name as well as actual ancestry. This is
 		// detection, not an atomic compare-and-use namespace operation.
-		var named unix.Stat_t
-		if err := unix.Fstatat(h.parent, h.name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		_, namedID, err := namedIdentity(h.parent, h.name)
+		if err != nil {
 			return err
 		}
-		if identity(&named) != identity(&st) {
+		if namedID != id {
 			return ErrContainment
 		}
 	}
@@ -281,6 +345,9 @@ func (r *Root) lookup(path string) (*handle, error) {
 	h.fd, err = openComponent(pfd, name, false)
 	if err == nil {
 		err = unix.Fstat(h.fd, &h.st)
+	}
+	if err == nil {
+		h.id, err = identity(h.fd, &h.st)
 	}
 	if err == nil {
 		err = h.check(r)
@@ -317,17 +384,17 @@ func (r *Root) accessFileUsing(h *handle, flags int, single bool,
 	if err := h.check(r); err != nil {
 		return -1, zero, err
 	}
-	var named unix.Stat_t
-	if err := unix.Fstatat(h.parent, h.name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+	named, namedID, err := namedIdentity(h.parent, h.name)
+	if err != nil {
 		return -1, zero, err
 	}
-	if identity(&named) != identity(&h.st) || named.Mode&unix.S_IFMT != unix.S_IFREG {
+	if namedID != h.id || named.Mode&unix.S_IFMT != unix.S_IFREG {
 		return -1, zero, ErrTargetChanged
 	}
 	if single && named.Nlink != 1 {
 		return -1, zero, ErrHardlinkMutation
 	}
-	fd, err := open(h.parent, h.name, flags|unix.O_NOFOLLOW|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOCTTY, 0)
+	fd, err := open(h.parent, h.name, flags|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOCTTY, 0)
 	if errors.Is(err, unix.ELOOP) {
 		return -1, zero, ErrSymlink
 	}
@@ -347,7 +414,11 @@ func (r *Root) checkAccess(fd int, h *handle, single bool) (unix.Stat_t, error) 
 	if err := unix.Fstat(fd, &st); err != nil {
 		return st, err
 	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG || identity(&st) != identity(&h.st) {
+	id, err := identity(fd, &st)
+	if err != nil {
+		return st, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || id != h.id {
 		return st, ErrTargetChanged
 	}
 	if err := r.checkLeaf(fd, &st); err != nil {

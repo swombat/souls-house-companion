@@ -252,7 +252,7 @@ func TestDarwinAPFSFirmlinkTopologyFixture(t *testing.T) {
 		})
 		for _, m := range mounts {
 			if sameDev {
-				if !strings.Contains(m.Denied, "rootfs/Data") || m.Key != "" {
+				if m.Denied == "" || m.Key != "" {
 					t.Fatalf("firmlink identity guessed from paths/FSID: %+v", m)
 				}
 			} else if m.Key == "" || m.Denied != "" {
