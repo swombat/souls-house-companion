@@ -107,3 +107,23 @@ child (responsible process) on the real Mac. Finder snapshot → one harmless
 action → snapshot in separate calls with refs resolving; refusal with the
 switch off and expired; a wait/batch expiring mid-call; a nested disallowed
 batch entry; a non-desktop operation regression; `execute:false` throughout.
+
+## Menu bar (`menubar/`)
+
+A small AppKit status item, built on the Mac with Swift 5.9+
+(`scripts/build-menubar.sh` → `dist/SoulsHouseMenu.app`, ad-hoc signed like
+the companion) and installed per user with `scripts/install-menubar.sh`
+(`~/Applications/SoulsHouseMenu.app`, previous copy kept as `.previous`,
+LaunchAgent `house.souls.menu` at login, no sudo).
+
+It holds no credentials and talks only to the installed companion CLI:
+`status --json` and `desktop status --json` every 5 s and when opened;
+`desktop on --minutes 15|60`, `desktop on --until-off`, `desktop off`,
+`pause`/`resume`, `accessibility --request`, and a button that opens the
+Accessibility pane. It shows whether control is on and until when,
+Accessibility granted / needs you, and the last action as resident, verb,
+app and time. Expiry is enforced by the companion, not by the menu: if the
+menu quits, control still turns itself off on time.
+
+The menu does not set the app scope; `desktop scope` stays a deliberate
+command.
