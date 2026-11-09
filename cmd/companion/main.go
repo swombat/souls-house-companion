@@ -44,6 +44,10 @@ func run(args []string) error {
 		fmt.Println(version)
 		return nil
 	}
+	if args[0] == "accessibility-probe" {
+		// Internal: a fresh process for the service's periodic check.
+		return accessibilityProbe()
+	}
 	policyAction := ""
 	if args[0] == "policy" {
 		if len(args) < 2 || (args[1] != "show" && args[1] != "apply") {
@@ -321,7 +325,7 @@ func serve(dir, unit string) error {
 	}
 	handler := &service.Handler{ProtectedPaths: protectedPaths, ExecuteLifecycle: state.ExecuteLifecycle}
 	if axtrust.Supported {
-		go watchAccessibility(ctx, dir, axtrust.System)
+		go watchAccessibility(ctx, dir, serviceChecker(exe))
 	}
 	c := client.New(handler)
 	c.Save = func(s client.State) error { return client.Save(dir, s) }

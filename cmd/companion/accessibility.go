@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -47,11 +49,9 @@ func accessibilityCommand(dir string, request bool) error {
 	if err := axtrust.Request(dir); err != nil {
 		return err
 	}
-	// A fresh service process makes the request at start; the running one
-	// would also pick the marker up within seconds if the restart failed.
-	if err := restartUserUnit(); err != nil {
-		return err
-	}
+	// The running service polls for the marker every five seconds. No restart:
+	// it would interrupt in-flight work (Mira, #12 review). The service makes
+	// no other in-process trust call, so its prompt is never a cached answer.
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		if obs, err := axtrust.Read(dir); err == nil && obs.Requested {
@@ -64,10 +64,73 @@ func accessibilityCommand(dir string, request bool) error {
 	return errors.New("service did not report the accessibility request; check status")
 }
 
+// macOS caches Accessibility trust for the life of a process: measured on
+// 9 Nov, the service still read false 60 s after the owner's grant reached
+// TCC, and true at once after a restart. Periodic checks therefore run in a
+// fresh child (the service stays its responsible process, so attribution is
+// unchanged); only the owner-requested prompt runs in the service itself.
+func serviceChecker(exe string) axtrust.Checker {
+	return func(prompt bool) (bool, error) {
+		if prompt {
+			return axtrust.System(true)
+		}
+		return probeChild(exe)
+	}
+}
+
+func probeChild(exe string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "accessibility-probe")
+	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
+	cmd.WaitDelay = time.Second
+	var out limitedProbeOutput
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return false, err
+	}
+	if out.overflow {
+		return false, errors.New("probe output exceeds bound")
+	}
+	var result struct {
+		Trusted bool `json:"trusted"`
+	}
+	d := json.NewDecoder(&out.Buffer)
+	d.DisallowUnknownFields()
+	if err := d.Decode(&result); err != nil {
+		return false, err
+	}
+	return result.Trusted, nil
+}
+
+type limitedProbeOutput struct {
+	bytes.Buffer
+	overflow bool
+}
+
+func (b *limitedProbeOutput) Write(p []byte) (int, error) {
+	n := len(p)
+	if room := 256 - b.Len(); room < n {
+		b.overflow = true
+		p = p[:max(room, 0)]
+	}
+	_, _ = b.Buffer.Write(p)
+	return n, nil
+}
+
+// accessibilityProbe answers for this fresh process and never prompts.
+func accessibilityProbe() error {
+	trusted, err := axtrust.System(false)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]bool{"trusted": trusted})
+}
+
 // watchAccessibility runs inside the service: an observation at start, an
-// owner request within five seconds, and a refresh every thirty so status
-// shows a grant made in System Settings without a restart. Failures never
-// stop the service.
+// owner request within five seconds, and a fresh-process refresh every
+// thirty so status shows a grant or revocation without a restart. Failures
+// never stop the service.
 func watchAccessibility(ctx context.Context, dir string, check axtrust.Checker) {
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()

@@ -165,6 +165,3 @@ func prepareProtectedPaths(home, dir, unit, exe string) ([]string, error) {
 	}
 	return []string{dir, filepath.Join(dir, "state.json"), unit, exe, serviceDir, environmentDir}, nil
 }
-
-// restartUserUnit is only used by the macOS accessibility request.
-func restartUserUnit() error { return errors.New("accessibility request is macOS only") }

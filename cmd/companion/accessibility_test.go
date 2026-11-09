@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -55,5 +56,28 @@ func TestWatchAccessibilityPromptsOnlyForOwnerRequest(t *testing.T) {
 func TestAccessibilityStatusBeforeAnyCheck(t *testing.T) {
 	if got := accessibilityStatus(t.TempDir()); got != "not_checked" {
 		t.Fatalf("status = %v", got)
+	}
+}
+
+func TestProbeChildParsesBoundedAnswer(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		path := dir + "/" + name
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	if trusted, err := probeChild(write("yes", `echo '{"trusted":true}'`)); err != nil || !trusted {
+		t.Fatalf("trusted=%v err=%v", trusted, err)
+	}
+	if _, err := probeChild(write("extra", `echo '{"trusted":true,"x":1}'`)); err == nil {
+		t.Fatal("accepted unknown field")
+	}
+	if _, err := probeChild(write("big", `head -c 4096 /dev/zero`)); err == nil {
+		t.Fatal("accepted oversized output")
+	}
+	if _, err := probeChild(write("fail", `exit 2`)); err == nil {
+		t.Fatal("accepted failed probe")
 	}
 }

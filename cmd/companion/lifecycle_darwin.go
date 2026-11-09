@@ -284,19 +284,3 @@ func prepareProtectedPaths(home, dir, unit, exe string) ([]string, error) {
 }
 
 var _ io.Writer = (*limitedManagerOutput)(nil)
-
-// restartUserUnit replaces the running service process (kickstart -k), so a
-// fresh LaunchAgent-started process makes the Accessibility request.
-func restartUserUnit() error {
-	ctx, cancel := context.WithTimeout(context.Background(), systemctlTimeout)
-	defer cancel()
-	absent, err := launchAgentAbsent(ctx)
-	if err != nil {
-		return err
-	}
-	if absent {
-		return errors.New("LaunchAgent not loaded; resume first")
-	}
-	_, err = launchctl(ctx, "kickstart", "-k", serviceTarget())
-	return err
-}
