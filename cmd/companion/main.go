@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/swombat/souls-house-companion/internal/axtrust"
 	"github.com/swombat/souls-house-companion/internal/client"
 	"github.com/swombat/souls-house-companion/internal/linuxfs"
 	"github.com/swombat/souls-house-companion/internal/policy"
@@ -43,6 +44,10 @@ func run(args []string) error {
 		fmt.Println(version)
 		return nil
 	}
+	if args[0] == "accessibility-probe" {
+		// Internal: a fresh process for the service's periodic check.
+		return accessibilityProbe()
+	}
 	policyAction := ""
 	if args[0] == "policy" {
 		if len(args) < 2 || (args[1] != "show" && args[1] != "apply") {
@@ -64,6 +69,7 @@ func run(args []string) error {
 	user := flags.Bool("user", false, "install ordinary user unit only")
 	contract := flags.String("accept-contract", "", "explicit local acceptance of versioned execute lifecycle; see docs/macos.md")
 	revokeContract := flags.Bool("revoke", false, "revoke local execute lifecycle acceptance (pause first)")
+	requestAccessibility := flags.Bool("request", false, "accessibility: ask the running service to request macOS Accessibility")
 	_ = flags.Bool("json", false, "machine-readable status")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
@@ -100,7 +106,9 @@ func run(args []string) error {
 		}
 	}
 	var lock *os.File
-	if args[0] != "status" && !(args[0] == "policy" && policyAction == "show") {
+	// The running service holds the lock; accessibility only writes a marker
+	// in the private directory and reads the service's observation.
+	if args[0] != "status" && args[0] != "accessibility" && !(args[0] == "policy" && policyAction == "show") {
 		lock, err = client.Lock(*dir)
 		if err != nil {
 			return err
@@ -108,6 +116,8 @@ func run(args []string) error {
 		defer lock.Close()
 	}
 	switch args[0] {
+	case "accessibility":
+		return accessibilityCommand(*dir, *requestAccessibility)
 	case "execute-lifecycle":
 		if (*revokeContract && *contract != "") || (!*revokeContract && *contract != runner.Lifecycle) {
 			return errors.New("exact lifecycle contract acceptance required")
@@ -208,6 +218,9 @@ func run(args []string) error {
 		}
 		if _, markerErr := os.Lstat(filepath.Join(*dir, "paused")); !os.IsNotExist(markerErr) {
 			localStatus["paused"] = true // marker presence/error is always deny
+		}
+		if axtrust.Supported {
+			localStatus["accessibility"] = accessibilityStatus(*dir)
 		}
 		addPlatformStatus(localStatus)
 		return json.NewEncoder(os.Stdout).Encode(localStatus)
@@ -311,6 +324,9 @@ func serve(dir, unit string) error {
 		return err
 	}
 	handler := &service.Handler{ProtectedPaths: protectedPaths, ExecuteLifecycle: state.ExecuteLifecycle}
+	if axtrust.Supported {
+		go watchAccessibility(ctx, dir, serviceChecker(exe))
+	}
 	c := client.New(handler)
 	c.Save = func(s client.State) error { return client.Save(dir, s) }
 	for ctx.Err() == nil {
