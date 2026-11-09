@@ -73,14 +73,16 @@ func refused(reason string) Result { return Result{Status: "refused", Reason: re
 
 // Authorise checks every grant for every step without running anything:
 // house grant, local scope (resident and app), switch, pause.
-func (s *Supervisor) Authorise(resident string, remote policy.Policy, steps []Step) (Switch, string) {
+// generation, when non-empty, must match the on-period accepted at the start:
+// turning control off and on again never revives earlier intent.
+func (s *Supervisor) Authorise(resident string, remote policy.Policy, steps []Step, generation string) (Switch, string) {
 	if !policy.RemoteAllowsDesktop(remote, resident) {
 		return Switch{}, ReasonNotGranted
 	}
-	return s.localAuthority(resident, steps)
+	return s.localAuthority(resident, steps, generation)
 }
 
-func (s *Supervisor) localAuthority(resident string, steps []Step) (Switch, string) {
+func (s *Supervisor) localAuthority(resident string, steps []Step, generation string) (Switch, string) {
 	if s.Paused != nil && s.Paused() != nil {
 		return Switch{}, ReasonPaused
 	}
@@ -101,7 +103,11 @@ func (s *Supervisor) localAuthority(resident string, steps []Step) (Switch, stri
 			return Switch{}, ReasonAppNotAllowed
 		}
 	}
-	return State(s.StateDir, s.now())
+	sw, reason := State(s.StateDir, s.now())
+	if reason == "" && generation != "" && sw.Generation() != generation {
+		return Switch{}, ReasonSwitchChanged
+	}
+	return sw, reason
 }
 
 // Do runs a parsed request. It always returns a result to report; the error
@@ -118,9 +124,11 @@ func (s *Supervisor) Do(ctx context.Context, resident string, remote policy.Poli
 	if err != nil {
 		return refused(ReasonInvalid)
 	}
-	if _, reason := s.Authorise(resident, remote, req.Steps); reason != "" {
+	accepted, reason := s.Authorise(resident, remote, req.Steps, "")
+	if reason != "" {
 		return refused(reason)
 	}
+	generation := accepted.Generation()
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutSeconds)*time.Second)
 	defer cancel()
 	if !s.lock(ctx) {
@@ -134,7 +142,7 @@ func (s *Supervisor) Do(ctx context.Context, resident string, remote policy.Poli
 	for _, step := range req.Steps {
 		// Recheck everything between actions; queued work never outlives
 		// a switch-off, expiry, pause, scope edit or house grant change.
-		sw, reason := s.Authorise(resident, remote, []Step{step})
+		sw, reason := s.Authorise(resident, remote, []Step{step}, generation)
 		if reason != "" {
 			if len(result.Steps) == 0 {
 				return refused(reason)
@@ -142,12 +150,12 @@ func (s *Supervisor) Do(ctx context.Context, resident string, remote policy.Poli
 			result.Status, result.Reason = "stopped", reason
 			return result
 		}
-		root, err := s.prepareRoot(resident, sw)
+		root, err := s.prepareRoot(resident, step.App, sw)
 		if err != nil {
 			result.Status, result.Reason = "stopped", ReasonUnavailable
 			return result
 		}
-		sr, stop := s.run(ctx, resident, step, root)
+		sr, stop := s.run(ctx, resident, generation, step, root)
 		result.Steps = append(result.Steps, sr)
 		outcome := "exit_" + strconv.Itoa(sr.ExitCode)
 		if stop != "" {
@@ -179,10 +187,13 @@ func (s *Supervisor) lock(ctx context.Context) bool {
 	}
 }
 
-// prepareRoot returns the resident's private root for this on-period. A root
-// from another period (or another resident) is never reused: refs are scoped
-// to resident and generation.
-func (s *Supervisor) prepareRoot(resident string, sw Switch) (string, error) {
+// prepareRoot returns the private state root for this resident, app and
+// on-period. agent-desktop resolves a ref (or a rooted snapshot/find) from the
+// saved element token without applying --app, so the only binding between a
+// ref and the app it was authorised for is that it can only be looked up in
+// the store it was captured in: a Terminal ref does not exist in Finder's
+// store. A root from another period is deleted before use.
+func (s *Supervisor) prepareRoot(resident, app string, sw Switch) (string, error) {
 	base := filepath.Join(s.StateDir, RootsDir)
 	if err := os.MkdirAll(base, 0700); err != nil {
 		return "", err
@@ -190,7 +201,7 @@ func (s *Supervisor) prepareRoot(resident string, sw Switch) (string, error) {
 	if err := privateDir(base); err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256([]byte(resident))
+	sum := sha256.Sum256([]byte(resident + "\x00" + app))
 	root := filepath.Join(base, hex.EncodeToString(sum[:12]))
 	gen := sw.Generation()
 	if data, err := readPrivate(filepath.Join(root, "generation")); err != nil || string(data) != gen {
@@ -218,7 +229,7 @@ func WipeRoots(stateDir string) error {
 	return os.RemoveAll(filepath.Join(stateDir, RootsDir))
 }
 
-func (s *Supervisor) run(parent context.Context, resident string, step Step, root string) (StepResult, string) {
+func (s *Supervisor) run(parent context.Context, resident, generation string, step Step, root string) (StepResult, string) {
 	sr := StepResult{Command: step.Command, App: step.App, ExitCode: -1}
 	limit := time.Duration(step.waitMS)*time.Millisecond + stepSlack
 	ctx, cancel := context.WithTimeoutCause(parent, limit, errStepTimeout)
@@ -234,7 +245,7 @@ func (s *Supervisor) run(parent context.Context, resident string, step Step, roo
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				if _, reason := s.localAuthority(resident, []Step{step}); reason != "" {
+				if _, reason := s.localAuthority(resident, []Step{step}, generation); reason != "" {
 					stopReason <- reason
 					cancel()
 					return

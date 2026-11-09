@@ -218,9 +218,19 @@ func parseStep(f map[string]json.RawMessage) (Step, error) {
 				flag(strings.ReplaceAll(k, "_", "-"), v)
 			}
 		}
-		for _, b := range [][2]string{{"exact", "--exact"}, {"first", "--first"}, {"last", "--last"}, {"count", "--count"}} {
-			if err := boolFlag(b[0], b[1]); err != nil {
+		if err := boolFlag("exact", "--exact"); err != nil {
+			return s, err
+		}
+		// Selection modes are mutually exclusive upstream, and with --limit.
+		selections := 0
+		for _, b := range [][2]string{{"first", "--first"}, {"last", "--last"}, {"count", "--count"}} {
+			v, present, err := boolean(f, b[0])
+			if err != nil {
 				return s, err
+			}
+			if present && v {
+				selections++
+				a = append(a, b[1])
 			}
 		}
 		if raw, ok := f["nth"]; ok {
@@ -228,17 +238,24 @@ func parseStep(f map[string]json.RawMessage) (Step, error) {
 			if err != nil {
 				return s, err
 			}
+			selections++
 			flag("nth", strconv.Itoa(n))
 		}
-		limit := 50
-		if raw, ok := f["limit"]; ok {
-			n, err := intField(raw, 1, 200)
-			if err != nil {
-				return s, err
-			}
-			limit = n
+		_, hasLimit := f["limit"]
+		if selections > 1 || (selections == 1 && hasLimit) {
+			return s, errInvalid
 		}
-		flag("limit", strconv.Itoa(limit)) // never 0 = unbounded
+		if selections == 0 {
+			limit := 50
+			if hasLimit {
+				n, err := intField(f["limit"], 1, 200)
+				if err != nil {
+					return s, err
+				}
+				limit = n
+			}
+			flag("limit", strconv.Itoa(limit)) // a list search is never unbounded
+		}
 		if err := common(false); err != nil {
 			return s, err
 		}

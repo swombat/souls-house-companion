@@ -272,3 +272,59 @@ func privateTemp(t *testing.T) string {
 	}
 	return dir
 }
+
+func TestQueuedWorkDoesNotCrossAnOffOnBoundary(t *testing.T) {
+	f := newFixture(t)
+	f.on(15 * time.Minute)
+	f.sup.mu.Lock()
+	done := make(chan Result, 1)
+	go func() { done <- f.do(snap) }()
+	time.Sleep(200 * time.Millisecond) // Do has authorised and is queued
+	if err := TurnOff(f.dir); err != nil {
+		t.Fatal(err)
+	}
+	f.clock.Add(int64(time.Second))
+	f.on(15 * time.Minute)
+	f.sup.mu.Unlock()
+	if r := <-done; r.Status != "refused" || r.Reason != ReasonSwitchChanged {
+		t.Fatalf("old intent revived: %+v", r)
+	}
+}
+
+func TestOffOnFasterThanThePollStillStopsTheRunningStep(t *testing.T) {
+	f := newFixture(t)
+	f.on(15 * time.Minute)
+	done := make(chan Result, 1)
+	go func() {
+		done <- f.do(`{"command":"batch","steps":[{"command":"find","app":"Finder","name":"sleeper"},{"command":"snapshot","app":"Finder"}]}`)
+	}()
+	time.Sleep(400 * time.Millisecond)
+	TurnOff(f.dir)
+	f.clock.Add(int64(time.Second))
+	f.on(15 * time.Minute) // within one poll interval
+	select {
+	case r := <-done:
+		if r.Status != "stopped" || r.Reason != ReasonStoppedMidCall+":"+ReasonSwitchChanged || len(r.Steps) != 1 {
+			t.Fatalf("%+v", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("running step survived an off/on")
+	}
+}
+
+func TestARefCannotBeUsedUnderAnotherApp(t *testing.T) {
+	f := newFixture(t)
+	if err := SaveScope(f.dir, Scope{Version: 1, Residents: []ResidentScope{{ID: "mira", Apps: []string{"Finder", "Notes"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	f.on(15 * time.Minute)
+	f.do(`{"command":"snapshot","app":"Notes"}`)
+	r := f.do(`{"command":"click","app":"Finder","ref":"@notesnap:e1"}`)
+	if !strings.Contains(string(r.Steps[0].Output), `"had_ref":"no"`) {
+		t.Fatalf("Notes ref store visible to a Finder step: %+v", r)
+	}
+	r = f.do(`{"command":"click","app":"Notes","ref":"@notesnap:e1"}`)
+	if !strings.Contains(string(r.Steps[0].Output), `"had_ref":"yes"`) {
+		t.Fatalf("Notes lost its own store: %+v", r)
+	}
+}

@@ -86,82 +86,84 @@ func awaitShutdown(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
-func TestRunOnceDrainsOnlyExecuteOnEveryConnectionExit(t *testing.T) {
-	for _, exit := range []string{"cancel", "local-pause", "pause", "revoke", "disconnect", "reject", "malformed", "invalid-request", "socket-close"} {
-		t.Run(exit, func(t *testing.T) {
-			executeStarted, filesystemStarted := make(chan struct{}), make(chan struct{})
-			cleanupStarted, releaseExecute, releaseFilesystem := make(chan struct{}), make(chan struct{}), make(chan struct{})
-			defer close(releaseFilesystem)
-			// Always release the execute fixture, including on assertion failure.
-			defer func() {
+func TestRunOnceDrainsOnlyProcessWorkersOnEveryConnectionExit(t *testing.T) {
+	for _, op := range []string{"execute", "desktop"} {
+		for _, exit := range []string{"cancel", "local-pause", "pause", "revoke", "disconnect", "reject", "malformed", "invalid-request", "socket-close"} {
+			t.Run(op+"/"+exit, func(t *testing.T) {
+				executeStarted, filesystemStarted := make(chan struct{}), make(chan struct{})
+				cleanupStarted, releaseExecute, releaseFilesystem := make(chan struct{}), make(chan struct{}), make(chan struct{})
+				defer close(releaseFilesystem)
+				// Always release the execute fixture, including on assertion failure.
+				defer func() {
+					select {
+					case <-releaseExecute:
+					default:
+						close(releaseExecute)
+					}
+				}()
+				c, state, terminal, delivered := shutdownFixture(t, handlerFunc(func(ctx context.Context, r Request, _ policy.Policy) ([]byte, string, error) {
+					if r.Operation == op {
+						close(executeStarted)
+						<-ctx.Done()
+						close(cleanupStarted)
+						<-releaseExecute // Models independent runner cleanup.
+					} else {
+						close(filesystemStarted)
+						<-releaseFilesystem // Models uninterruptible filesystem I/O.
+					}
+					return []byte("must not deliver"), "binary", nil
+				}), op, "read")
+				var denied atomic.Bool
+				c.BeforeDelivery = func() error {
+					if denied.Load() {
+						return ErrPaused
+					}
+					return nil
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				done := make(chan error, 1)
+				go func() { done <- c.RunOnce(ctx, &state) }()
+				awaitShutdown(t, executeStarted, "execute")
+				awaitShutdown(t, filesystemStarted, "filesystem")
+				switch exit {
+				case "cancel":
+					cancel()
+				case "local-pause":
+					denied.Store(true)
+				case "pause", "revoke":
+					terminal <- []byte(`{"message":{"type":"` + exit + `"}}`)
+				case "disconnect":
+					terminal <- []byte(`{"type":"disconnect"}`)
+				case "reject":
+					terminal <- []byte(`{"type":"reject_subscription"}`)
+				case "malformed":
+					terminal <- []byte(`{`)
+				case "invalid-request":
+					terminal <- []byte(`{"message":{"type":"request"}}`)
+				case "socket-close":
+					terminal <- nil
+				}
+				awaitShutdown(t, cleanupStarted, "independent cleanup")
 				select {
-				case <-releaseExecute:
-				default:
-					close(releaseExecute)
+				case err := <-done:
+					t.Fatalf("connection returned before execute cleanup: %v", err)
+				case <-time.After(25 * time.Millisecond):
 				}
-			}()
-			c, state, terminal, delivered := shutdownFixture(t, handlerFunc(func(ctx context.Context, r Request, _ policy.Policy) ([]byte, string, error) {
-				if r.Operation == "execute" {
-					close(executeStarted)
-					<-ctx.Done()
-					close(cleanupStarted)
-					<-releaseExecute // Models independent runner cleanup.
-				} else {
-					close(filesystemStarted)
-					<-releaseFilesystem // Models uninterruptible filesystem I/O.
+				close(releaseExecute)
+				select {
+				case err := <-done:
+					if !errors.Is(err, ErrTransport) || errors.Is(err, ErrExecuteShutdown) {
+						t.Fatalf("unexpected drained connection result: %v", err)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("execute cleanup waited for abandoned filesystem worker")
 				}
-				return []byte("must not deliver"), "binary", nil
-			}), "execute", "read")
-			var denied atomic.Bool
-			c.BeforeDelivery = func() error {
-				if denied.Load() {
-					return ErrPaused
+				if delivered.Load() != 0 {
+					t.Fatal("result delivered after cancellation")
 				}
-				return nil
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			done := make(chan error, 1)
-			go func() { done <- c.RunOnce(ctx, &state) }()
-			awaitShutdown(t, executeStarted, "execute")
-			awaitShutdown(t, filesystemStarted, "filesystem")
-			switch exit {
-			case "cancel":
-				cancel()
-			case "local-pause":
-				denied.Store(true)
-			case "pause", "revoke":
-				terminal <- []byte(`{"message":{"type":"` + exit + `"}}`)
-			case "disconnect":
-				terminal <- []byte(`{"type":"disconnect"}`)
-			case "reject":
-				terminal <- []byte(`{"type":"reject_subscription"}`)
-			case "malformed":
-				terminal <- []byte(`{`)
-			case "invalid-request":
-				terminal <- []byte(`{"message":{"type":"request"}}`)
-			case "socket-close":
-				terminal <- nil
-			}
-			awaitShutdown(t, cleanupStarted, "independent cleanup")
-			select {
-			case err := <-done:
-				t.Fatalf("connection returned before execute cleanup: %v", err)
-			case <-time.After(25 * time.Millisecond):
-			}
-			close(releaseExecute)
-			select {
-			case err := <-done:
-				if !errors.Is(err, ErrTransport) || errors.Is(err, ErrExecuteShutdown) {
-					t.Fatalf("unexpected drained connection result: %v", err)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("execute cleanup waited for abandoned filesystem worker")
-			}
-			if delivered.Load() != 0 {
-				t.Fatal("result delivered after cancellation")
-			}
-		})
+			})
+		}
 	}
 }
 

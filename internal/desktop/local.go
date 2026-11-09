@@ -46,6 +46,7 @@ const (
 	ReasonSwitchOff      = "switch_off"
 	ReasonSwitchExpired  = "switch_expired"
 	ReasonSwitchInvalid  = "switch_unreadable"
+	ReasonSwitchChanged  = "switch_changed_since_request"
 	ReasonPaused         = "paused"
 	ReasonInvalid        = "invalid_request"
 	ReasonUnavailable    = "agent_desktop_unavailable"

@@ -20,7 +20,7 @@ and the first accepted scope is Finder only.
 
 A refusal names one reason: `not_granted_by_house`,
 `resident_not_in_local_scope`, `app_not_in_local_scope`, `switch_off`,
-`switch_expired`, `switch_unreadable`, `paused`, `invalid_request`,
+`switch_expired`, `switch_unreadable`, `switch_changed_since_request`, `paused`, `invalid_request`,
 `agent_desktop_unavailable`, `platform_not_supported`, `timeout`.
 
 The scope and switch are separate files, not fields in `state.json`, so a
@@ -49,13 +49,16 @@ whole request. Never emitted: `--headed`, `--force`, `--session`,
 Surfaces are limited to the app's own (window, menu, menubar, sheet, popover,
 alert). `press` always carries `--app`, so keys go to that app's process and
 never to whatever is frontmost. `type` text (≤10,000 bytes) goes over stdin,
-never argv. Values are `--flag=value` and refs/combos follow `--`, so no value
+never argv. `find` selections (`first`, `last`, `count`, `nth`) are mutually
+exclusive and exclude `limit`; a plain list search gets `--limit=50` unless a
+`limit` (1–200) is given. Values are `--flag=value` and refs/combos follow `--`, so no value
 can become a flag. Waits ≤30 s, `find` limit ≤200 (default 50),
 `timeout_seconds` 1–120 (house deadline ≤121 s).
 
 ## Process lifetime
 
-No agent-desktop process outlives its call. In v1.2.0 a macOS ref is
+No agent-desktop process outlives its call. Desktop workers are drained at
+connection exit and service shutdown like execute workers (bounded grace). In v1.2.0 a macOS ref is
 re-identified from an element token saved in the state root (strict
 resolution, `retained_object_stale` when gone); no long-lived host is
 needed, so none is kept. The supervisor serialises calls, starts each in its
@@ -66,8 +69,14 @@ or deadline sends TERM then KILL to the group. After every call the group is
 killed again. An interrupted step is reported as `stopped` and never
 replayed; later batch steps do not run.
 
-Refs are scoped to resident and on-period: each resident has its own state
-root, and a root from an earlier on-period is deleted before use.
+Refs are scoped to resident, app and on-period. agent-desktop resolves a ref
+(and a rooted snapshot/find) from its saved element token without applying
+`--app`, so each resident+app pair has its own state root: a ref captured in
+one app does not exist in another app's store. A root from an earlier
+on-period is deleted before use. The on-period accepted when a request is
+authorised is bound to it: a request queued, or a batch running, across an
+off/on is refused or stopped (`switch_changed_since_request`), never resumed
+in the new period.
 
 This is separate code from the execute runner and does not change the
 execute lifecycle contract (`docs/macos.md`, S2 "Execute and removal").

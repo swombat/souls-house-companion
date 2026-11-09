@@ -83,3 +83,22 @@ func TestParseRefusals(t *testing.T) {
 		t.Error("accepted oversized batch")
 	}
 }
+
+func TestFindSelectionsAreExclusive(t *testing.T) {
+	r := mustParse(t, `{"command":"find","app":"Finder","name":"x","first":true}`)
+	for _, a := range r.Steps[0].Argv() {
+		if strings.HasPrefix(a, "--limit") {
+			t.Fatalf("limit emitted with a selection: %q", r.Steps[0].Argv())
+		}
+	}
+	for _, s := range []string{
+		`{"command":"find","app":"Finder","first":true,"last":true}`,
+		`{"command":"find","app":"Finder","count":true,"limit":5}`,
+		`{"command":"find","app":"Finder","nth":2,"first":true}`,
+		`{"command":"batch","steps":[{"command":"snapshot","app":"Finder"},{"command":"find","app":"Finder","nth":1,"limit":3}]}`,
+	} {
+		if _, err := Parse(json.RawMessage(s)); err == nil {
+			t.Errorf("accepted %s", s)
+		}
+	}
+}
