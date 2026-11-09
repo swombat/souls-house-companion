@@ -27,7 +27,7 @@ var ErrTransport = errors.New("companion transport refused")
 var ErrPaused = errors.New("companion paused")
 var ErrAuthority = errors.New("companion authority refused")
 
-// ErrExecuteShutdown means an execute worker exceeded the shutdown grace.
+// ErrExecuteShutdown means an execute or desktop worker exceeded the shutdown grace.
 // Returning from RunOnce is not proof that its transient unit is quiescent.
 var ErrExecuteShutdown = errors.New("companion execute shutdown incomplete")
 
@@ -322,8 +322,8 @@ func (c *Client) runOnce(ctx context.Context, state *State, shutdownGrace time.D
 			continue
 		}
 		finishExecute := func() {}
-		if request.Operation == "execute" {
-			// Register before spawning, so cancellation cannot miss a worker
+		if request.Operation == "execute" || request.Operation == "desktop" {
+			// Both own subprocesses. Register before spawning, so cancellation cannot miss a worker
 			// that has not yet reached Handle (including input fetches).
 			finishExecute = executions.start()
 		}

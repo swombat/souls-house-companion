@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/swombat/souls-house-companion/internal/client"
+	"github.com/swombat/souls-house-companion/internal/desktop"
 	"github.com/swombat/souls-house-companion/internal/linuxfs"
 	"github.com/swombat/souls-house-companion/internal/policy"
 	"github.com/swombat/souls-house-companion/internal/runner"
@@ -42,9 +43,11 @@ func (h *Handler) AuthorizeInput(request client.Request, ceiling policy.Policy) 
 type Handler struct {
 	ProtectedPaths   []string
 	ExecuteLifecycle string
-	mu               sync.Mutex
-	cursors          map[string]*scan
-	cursorCounts     map[string]int
+	// Desktop is nil when the service runs without desktop control.
+	Desktop      *desktop.Supervisor
+	mu           sync.Mutex
+	cursors      map[string]*scan
+	cursorCounts map[string]int
 }
 
 type arguments struct {
@@ -71,6 +74,15 @@ func (h *Handler) Handle(ctx context.Context, request client.Request, ceiling po
 func (h *Handler) handle(ctx context.Context, request client.Request, ceiling policy.Policy) ([]byte, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "json", err
+	}
+	if request.Operation == "desktop" {
+		// Independent authority: neither read/write nor execute implies it.
+		result := desktop.Result{Status: "refused", Reason: desktop.ReasonPlatform}
+		if h.Desktop != nil {
+			result = h.Desktop.Do(ctx, request.ResidentID, request.Policy, request.Arguments)
+		}
+		data, err := json.Marshal(result)
+		return data, "json", err
 	}
 	var args arguments
 	if err := json.Unmarshal(request.Arguments, &args); err != nil {

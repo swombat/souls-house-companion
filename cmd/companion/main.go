@@ -17,6 +17,7 @@ import (
 
 	"github.com/swombat/souls-house-companion/internal/axtrust"
 	"github.com/swombat/souls-house-companion/internal/client"
+	"github.com/swombat/souls-house-companion/internal/desktop"
 	"github.com/swombat/souls-house-companion/internal/linuxfs"
 	"github.com/swombat/souls-house-companion/internal/policy"
 	"github.com/swombat/souls-house-companion/internal/runner"
@@ -43,6 +44,13 @@ func run(args []string) error {
 	if args[0] == "version" {
 		fmt.Println(version)
 		return nil
+	}
+	if args[0] == "desktop" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		return desktopCommand(home, args[1:])
 	}
 	if args[0] == "accessibility-probe" {
 		// Internal: a fresh process for the service's periodic check.
@@ -298,7 +306,7 @@ func loadPolicy(path string) (policy.Policy, error) {
 	if err := d.Decode(&p); err != nil {
 		return p, err
 	}
-	return p, p.Validate()
+	return p, policy.LocalCeilingValid(p)
 }
 
 func serve(dir, unit string) error {
@@ -323,7 +331,22 @@ func serve(dir, unit string) error {
 	if err != nil {
 		return err
 	}
-	handler := &service.Handler{ProtectedPaths: protectedPaths, ExecuteLifecycle: state.ExecuteLifecycle}
+	// Desktop control always starts off: a restart drops the switch and every
+	// resident's refs. A failure to drop them refuses to serve.
+	if err := errors.Join(desktop.TurnOff(dir), desktop.WipeRoots(dir)); err != nil {
+		return err
+	}
+	handler := &service.Handler{ProtectedPaths: protectedPaths, ExecuteLifecycle: state.ExecuteLifecycle,
+		Desktop: &desktop.Supervisor{StateDir: dir, Binary: agentDesktopBinary(home), Paused: func() error {
+			if _, err := os.Lstat(filepath.Join(dir, "paused")); !os.IsNotExist(err) {
+				return errors.New("locally paused")
+			}
+			current, err := client.Load(dir)
+			if err != nil || current.Paused {
+				return errors.New("locally paused")
+			}
+			return nil
+		}}}
 	if axtrust.Supported {
 		go watchAccessibility(ctx, dir, serviceChecker(exe))
 	}
