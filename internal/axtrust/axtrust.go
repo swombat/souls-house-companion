@@ -8,6 +8,7 @@
 package axtrust
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -41,9 +42,14 @@ type Observation struct {
 
 // Request records an owner request for the service to prompt.
 func Request(dir string) error {
-	f, err := os.OpenFile(filepath.Join(dir, RequestFile), os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
+	// O_NONBLOCK: a FIFO here fails (ENXIO) instead of blocking the CLI.
+	f, err := os.OpenFile(filepath.Join(dir, RequestFile), os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
 	if err != nil {
 		return err
+	}
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
+		f.Close()
+		return errors.New("regular request marker required")
 	}
 	syncErr := f.Sync()
 	closeErr := f.Close()
@@ -100,7 +106,8 @@ func write(dir string, obs Observation) error {
 // Read returns the last observation; os.ErrNotExist means never checked.
 func Read(dir string) (Observation, error) {
 	var obs Observation
-	f, err := os.OpenFile(filepath.Join(dir, ObservationFile), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	// O_NONBLOCK so a FIFO opens at once and is refused by the check below.
+	f, err := os.OpenFile(filepath.Join(dir, ObservationFile), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return obs, err
 	}
@@ -109,8 +116,37 @@ func Read(dir string) (Observation, error) {
 	if err != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
 		return obs, errors.New("private observation file required")
 	}
-	d := json.NewDecoder(io.LimitReader(f, 4<<10))
+	var raw struct {
+		Trusted   *bool  `json:"trusted"`
+		Requested bool   `json:"requested,omitempty"`
+		Error     string `json:"error,omitempty"`
+		CheckedAt string `json:"checked_at"`
+	}
+	if err := DecodeStrict(io.LimitReader(f, 4<<10), &raw); err != nil {
+		return obs, err
+	}
+	if raw.Trusted == nil || raw.CheckedAt == "" {
+		return obs, errors.New("incomplete observation")
+	}
+	return Observation{Trusted: *raw.Trusted, Requested: raw.Requested, Error: raw.Error, CheckedAt: raw.CheckedAt}, nil
+}
+
+// DecodeStrict decodes exactly one JSON object: no unknown fields, no null,
+// nothing but whitespace after it.
+func DecodeStrict(r io.Reader, v any) error {
+	d := json.NewDecoder(r)
 	d.DisallowUnknownFields()
-	err = d.Decode(&obs)
-	return obs, err
+	var raw json.RawMessage
+	if err := d.Decode(&raw); err != nil {
+		return err
+	}
+	if len(raw) == 0 || raw[0] != '{' {
+		return errors.New("JSON object required")
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return errors.New("trailing data after JSON object")
+	}
+	inner := json.NewDecoder(bytes.NewReader(raw))
+	inner.DisallowUnknownFields()
+	return inner.Decode(v)
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -105,5 +106,48 @@ func TestObserveReplacesSymlinkedObservation(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(target); string(b) != "keep" {
 		t.Fatal("wrote through a symlink")
+	}
+}
+
+func TestFIFOStateFailsInsteadOfBlocking(t *testing.T) {
+	dir := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(dir, RequestFile), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(dir, ObservationFile), 0600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan [2]error, 1)
+	go func() {
+		_, readErr := Read(dir)
+		done <- [2]error{Request(dir), readErr}
+	}()
+	select {
+	case errs := <-done:
+		if errs[0] == nil {
+			t.Fatal("Request accepted a FIFO marker")
+		}
+		if errs[1] == nil {
+			t.Fatal("Read accepted a FIFO observation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("FIFO state blocked the CLI")
+	}
+}
+
+func TestReadRejectsNullMissingAndTrailing(t *testing.T) {
+	for name, body := range map[string]string{
+		"null":     `null`,
+		"missing":  `{"checked_at":"x"}`,
+		"no-time":  `{"trusted":true}`,
+		"trailing": `{"trusted":true,"checked_at":"x"} {}`,
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ObservationFile), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Read(dir); err == nil {
+			t.Fatalf("accepted %s observation", name)
+		}
 	}
 }

@@ -77,6 +77,20 @@ func TestProbeChildParsesBoundedAnswer(t *testing.T) {
 	if _, err := probeChild(write("big", `head -c 4096 /dev/zero`)); err == nil {
 		t.Fatal("accepted oversized output")
 	}
+	// Valid JSON first, then >256 bytes of whitespace: only the bound can
+	// reject this, since the decoder alone would accept it.
+	if _, err := probeChild(write("padded", `echo '{"trusted":true}'; printf '%4096s' ''`)); err == nil || err.Error() != "probe output exceeds bound" {
+		t.Fatalf("padded output not rejected by the bound: %v", err)
+	}
+	for name, body := range map[string]string{
+		"null":     `echo 'null'`,
+		"missing":  `echo '{}'`,
+		"trailing": `echo '{"trusted":true} {"trusted":false}'`,
+	} {
+		if _, err := probeChild(write(name, body)); err == nil {
+			t.Fatalf("accepted %s answer", name)
+		}
+	}
 	if _, err := probeChild(write("fail", `exit 2`)); err == nil {
 		t.Fatal("accepted failed probe")
 	}

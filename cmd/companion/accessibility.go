@@ -93,28 +93,32 @@ func probeChild(exe string) (bool, error) {
 		return false, errors.New("probe output exceeds bound")
 	}
 	var result struct {
-		Trusted bool `json:"trusted"`
+		Trusted *bool `json:"trusted"`
 	}
-	d := json.NewDecoder(&out.Buffer)
-	d.DisallowUnknownFields()
-	if err := d.Decode(&result); err != nil {
+	if err := axtrust.DecodeStrict(&out.buf, &result); err != nil {
 		return false, err
 	}
-	return result.Trusted, nil
+	if result.Trusted == nil {
+		return false, errors.New("probe answer missing trusted")
+	}
+	return *result.Trusted, nil
 }
 
+// limitedProbeOutput keeps its buffer in a named field: an embedded
+// bytes.Buffer would promote ReadFrom, and os/exec's io.Copy would then
+// bypass this Write and its bound.
 type limitedProbeOutput struct {
-	bytes.Buffer
+	buf      bytes.Buffer
 	overflow bool
 }
 
 func (b *limitedProbeOutput) Write(p []byte) (int, error) {
 	n := len(p)
-	if room := 256 - b.Len(); room < n {
+	if room := 256 - b.buf.Len(); room < n {
 		b.overflow = true
 		p = p[:max(room, 0)]
 	}
-	_, _ = b.Buffer.Write(p)
+	_, _ = b.buf.Write(p)
 	return n, nil
 }
 
