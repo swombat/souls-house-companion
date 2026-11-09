@@ -113,10 +113,21 @@ batch entry; a non-desktop operation regression; `execute:false` throughout.
 A small AppKit status item, built on the Mac with Swift 5.9+
 (`scripts/build-menubar.sh` → `dist/SoulsHouseMenu.app`, ad-hoc signed like
 the companion) and installed per user with `scripts/install-menubar.sh`
-(`~/Applications/SoulsHouseMenu.app`, previous copy kept as `.previous`,
-LaunchAgent `house.souls.menu` at login, no sudo).
+(`~/Applications/SoulsHouseMenu.app`, LaunchAgent `house.souls.menu` at
+login, no sudo). The installer stages and verifies the new copy (bundle,
+executable, `codesign --verify`) before touching the installed one, keeps the
+previous copy as `.previous`, and if loading fails puts the previous copy back
+and loads it. Roll back with `scripts/install-menubar.sh --rollback`; an
+installed copy is refused as a source. `scripts/test-install-menubar.sh` runs
+the installer against stub launchctl/codesign in a throwaway HOME.
 
-It holds no credentials and talks only to the installed companion CLI:
+It holds no credentials and talks only to the installed companion CLI, with
+a deadline that does not depend on the child (TERM, then KILL), a 1 MiB
+output cap and a bounded drain (`MenuCore.runCLI`). Changes run one at a time
+in the order asked for, and a status read taken before or during a change is
+dropped. A status it cannot read is shown as unknown, never as off, and in
+that state the menu offers only Turn off. A failed change stays visible.
+Swift tests: `cd menubar && swift test`. Calls:
 `status --json` and `desktop status --json` every 5 s and when opened;
 `desktop on --minutes 15|60`, `desktop on --until-off`, `desktop off`,
 `pause`/`resume`, `accessibility --request`, and a button that opens the

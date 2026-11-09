@@ -5,6 +5,8 @@ let package = Package(
     name: "SoulsHouseMenu",
     platforms: [.macOS(.v13)],
     targets: [
-        .executableTarget(name: "SoulsHouseMenu", path: "Sources/SoulsHouseMenu")
+        .target(name: "MenuCore", path: "Sources/MenuCore"),
+        .executableTarget(name: "SoulsHouseMenu", dependencies: ["MenuCore"], path: "Sources/SoulsHouseMenu"),
+        .testTarget(name: "MenuCoreTests", dependencies: ["MenuCore"], path: "Tests/MenuCoreTests"),
     ]
 )
