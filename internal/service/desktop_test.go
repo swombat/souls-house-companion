@@ -3,10 +3,14 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/swombat/souls-house-companion/internal/client"
+	"github.com/swombat/souls-house-companion/internal/desktop"
 	"github.com/swombat/souls-house-companion/internal/policy"
 )
 
@@ -21,5 +25,49 @@ func TestDesktopIsIndependentOfOtherKinds(t *testing.T) {
 	h.ExecuteLifecycle = "x"
 	if h.AuthorizeInput(client.Request{Operation: "execute", ResidentID: "r", Arguments: json.RawMessage(`{}`), Policy: desk}, desk) == nil {
 		t.Fatal("desktop grant authorised execute")
+	}
+}
+
+func TestDesktopRunsOnlyTheFetchedPayload(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0700)
+	binDir := filepath.Join(t.TempDir(), "ad")
+	os.Mkdir(binDir, 0755)
+	bin := filepath.Join(binDir, "agent-desktop")
+	os.WriteFile(bin, []byte("#!/bin/sh\nprintf '{\"ok\":true}'\n"), 0755)
+	h := &Handler{Desktop: &desktop.Supervisor{StateDir: dir, Binary: bin, Platform: "darwin"}}
+	desk := policy.Policy{Residents: []policy.Resident{{ID: "r", Desktop: true}}}
+	receipt := json.RawMessage(`{"command":"snapshot","app":"Finder","input_size":36}`)
+	req := client.Request{Operation: "desktop", ResidentID: "r", Arguments: receipt, Policy: desk, InputRequired: true}
+
+	if h.AuthorizeInput(req, desk) == nil {
+		t.Fatal("payload fetch authorised with no local scope or switch")
+	}
+	desktop.SaveScope(dir, desktop.Scope{Version: 1, Residents: []desktop.ResidentScope{{ID: "r", Apps: []string{"Finder"}}}})
+	if h.AuthorizeInput(req, desk) == nil {
+		t.Fatal("payload fetch authorised with the switch off")
+	}
+	desktop.TurnOn(dir, time.Now(), 15*time.Minute, false)
+	if err := h.AuthorizeInput(req, desk); err != nil {
+		t.Fatalf("payload fetch refused when everything allows it: %v", err)
+	}
+	other := req
+	other.Policy = policy.Policy{Residents: []policy.Resident{{ID: "r", Execute: true}}}
+	if h.AuthorizeInput(other, other.Policy) == nil {
+		t.Fatal("payload fetch authorised without the house desktop grant")
+	}
+
+	// The receipt in the envelope never runs, even when it parses.
+	noInput := req
+	noInput.InputRequired = false
+	noInput.Arguments = json.RawMessage(`{"command":"snapshot","app":"Finder"}`)
+	data, _, _ := h.Handle(context.Background(), noInput, desk)
+	if !strings.Contains(string(data), `"invalid_request"`) {
+		t.Fatalf("envelope arguments ran: %s", data)
+	}
+	req.Input = []byte(`{"command":"snapshot","app":"Finder"}`)
+	data, _, _ = h.Handle(context.Background(), req, desk)
+	if !strings.Contains(string(data), `"completed"`) {
+		t.Fatalf("fetched payload did not run: %s", data)
 	}
 }

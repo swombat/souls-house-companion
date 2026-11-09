@@ -24,7 +24,7 @@ func validDeadline(r Request, now time.Time) bool {
 
 // Input downloads are consumed once. An ambiguous failure is never retried.
 func (c *Client) input(ctx context.Context, state State, r Request) ([]byte, error) {
-	if validateURL(state.URL) != nil || (r.Operation != "write" && r.Operation != "execute") {
+	if validateURL(state.URL) != nil || (r.Operation != "write" && r.Operation != "execute" && r.Operation != "desktop") {
 		return nil, ErrAuthority
 	}
 	var args struct {

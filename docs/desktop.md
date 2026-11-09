@@ -91,8 +91,13 @@ and outcome only: never refs, typed text, window titles or snapshot contents.
 
 ## S2 clauses touched
 
-- Protocol: `desktop` downloads no input; both grants are checked before
-  dispatch, as for other kinds. A lost response is not replayed.
+- Protocol: `desktop` is input-required. The Cable envelope and the house's
+  retained row carry only a receipt (verbs, apps, `input_size`); the full
+  payload (typed text, refs) is fetched once over the device-authenticated
+  input endpoint, after the house grant and the local scope/switch/pause are
+  checked, and every check runs again on the payload before anything acts.
+  Envelope arguments never run: a desktop request without fetched input is
+  refused. A lost response is not replayed.
 - "Execute is general service-user authority": unchanged; desktop is not
   execute and a desktop grant never satisfies `AllowsExecute`.
 - Execute runner cleanup contract: unchanged; desktop uses its own
