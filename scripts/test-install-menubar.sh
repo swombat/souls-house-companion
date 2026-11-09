@@ -7,7 +7,11 @@ trap 'rm -rf "$root"' EXIT
 stubs="$root/stubs"; mkdir -p "$stubs"
 cat > "$stubs/launchctl" <<'EOF'
 #!/bin/sh
-[ "$1" = bootstrap ] && [ -f "$HOME/fail-bootstrap" ] && exit 1
+if [ "$1" = bootstrap ]; then
+  echo "bootstrap $(sed -n 's:.*<array><string>\(.*\)</string></array>.*:\1:p' "$3")" >> "$HOME/launchctl.log"
+  [ -f "$HOME/fail-bootstrap" ] && exit 1
+  if [ -f "$HOME/fail-bootstrap-once" ]; then rm "$HOME/fail-bootstrap-once"; exit 1; fi
+fi
 exit 0
 EOF
 cat > "$stubs/codesign" <<'EOF'
@@ -44,10 +48,35 @@ if sh "$here/install-menubar.sh" "$root/v3.app" 2>/dev/null; then fail "accepted
 rm "$root/v3.app/Contents/broken-signature"
 [ "$(which_app "$inst")" = v2 ] || fail "bad signature changed the installed copy"
 
-touch "$HOME/fail-bootstrap"
-if sh "$here/install-menubar.sh" "$root/v3.app" 2>/dev/null; then fail "bootstrap failure reported success"; fi
+agent="$HOME/Library/LaunchAgents/house.souls.menu.plist"
+printf '<!-- owner edit -->\n' >> "$agent"
+before=$(cksum < "$agent")
+: > "$HOME/launchctl.log"
+touch "$HOME/fail-bootstrap-once"
+if sh "$here/install-menubar.sh" "$root/v3.app" 2>"$root/err"; then fail "bootstrap failure reported success"; fi
 [ "$(which_app "$inst")" = v2 ] && [ "$(which_app "$inst.previous")" = v1 ] || fail "bootstrap failure did not restore v2/v1"
+[ "$(cksum < "$agent")" = "$before" ] || fail "old plist bytes not restored"
+[ "$(grep -c bootstrap "$HOME/launchctl.log")" = 2 ] || fail "restored copy was not reloaded"
+grep -q "restored" "$root/err" && ! grep -q "could NOT" "$root/err" || fail "recovery not reported"
+
+touch "$HOME/fail-bootstrap"
+if sh "$here/install-menubar.sh" "$root/v3.app" 2>"$root/err"; then fail "double failure reported success"; fi
+grep -q "could NOT be loaded" "$root/err" || fail "failed recovery reload was hidden"
+[ "$(which_app "$inst")" = v2 ] && [ "$(cksum < "$agent")" = "$before" ] || fail "double failure left a changed install"
 rm "$HOME/fail-bootstrap"
+
+# A failure publishing the plist (after the app moved) also restores.
+mkdir -p "$agent.staging.blocker"
+chmod 500 "$HOME/Library/LaunchAgents"
+if sh "$here/install-menubar.sh" "$root/v3.app" 2>/dev/null; then chmod 700 "$HOME/Library/LaunchAgents"; fail "unwritable LaunchAgents reported success"; fi
+chmod 700 "$HOME/Library/LaunchAgents"; rmdir "$agent.staging.blocker"
+[ "$(which_app "$inst")" = v2 ] && [ "$(which_app "$inst.previous")" = v1 ] && [ "$(cksum < "$agent")" = "$before" ] || fail "plist staging failure changed the install"
+
+# First install with no plist before: a failure leaves no plist behind.
+export HOME="$root/fresh"; mkdir -p "$HOME"; touch "$HOME/fail-bootstrap"
+if sh "$here/install-menubar.sh" "$root/v1.app" 2>/dev/null; then fail "fresh failure reported success"; fi
+[ ! -e "$HOME/Library/LaunchAgents/house.souls.menu.plist" ] && [ ! -e "$HOME/Applications/SoulsHouseMenu.app" ] || fail "fresh failure left an install behind"
+export HOME="$root/A&B <home>"
 
 sh "$here/install-menubar.sh" --rollback >/dev/null
 [ "$(which_app "$inst")" = v1 ] && [ "$(which_app "$inst.previous")" = v2 ] || fail "rollback swaps previous in"

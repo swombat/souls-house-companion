@@ -27,10 +27,10 @@ valid_app() {
     "$CODESIGN" --verify "$1" >/dev/null 2>&1
 }
 
-write_plist() {
+stage_plist() {
   mkdir -p "$HOME/Library/LaunchAgents"
-  tmp="$plist.tmp"
-  cat > "$tmp" <<PLIST
+  rm -rf "$plist.staging"
+  cat > "$plist.staging" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -42,7 +42,6 @@ write_plist() {
   <key>ProcessType</key><string>Interactive</string>
 </dict></plist>
 PLIST
-  mv "$tmp" "$plist"
 }
 
 load() { "$LAUNCHCTL" bootout "$domain/$label" >/dev/null 2>&1 || true; "$LAUNCHCTL" bootstrap "$domain" "$plist"; }
@@ -71,28 +70,45 @@ if [ "$rollback" = 0 ]; then
 fi
 valid_app "$stage" || { rm -rf "$stage"; die "staged copy failed verification"; }
 
-# Rotate only now: current -> .previous, staged -> current.
+# Everything new is staged; keep the exact old plist (or its absence).
+stage_plist || { rm -rf "$stage" "$plist.staging"; die "could not stage the LaunchAgent"; }
+had_plist=0
+if [ -e "$plist" ]; then
+  had_plist=1
+  rm -rf "$plist.backup"
+  cp -p "$plist" "$plist.backup" || { rm -rf "$stage" "$plist.staging"; die "could not back up the LaunchAgent"; }
+fi
 had_current=0
-if [ -d "$dest" ]; then
-  had_current=1
-  rm -rf "$prev.old"
-  [ -d "$prev" ] && mv "$prev" "$prev.old"
-  mv "$dest" "$prev"
-fi
-mv "$stage" "$dest"
-write_plist
-if load; then
-  rm -rf "$prev.old"
-  printf 'Installed %s; LaunchAgent %s loaded\n' "$dest" "$label"
-  exit 0
-fi
+[ -d "$dest" ] && had_current=1
+rotated_prev=0
 
-# Loading failed: put the previous copy back and load it.
-rm -rf "$dest.failed"
-mv "$dest" "$dest.failed"
+# The one restoration path for any failure after the first replacement.
+restore() {
+  rm -rf "$dest.failed"
+  [ -d "$dest" ] && mv "$dest" "$dest.failed"
+  if [ "$had_current" = 1 ]; then
+    mv "$prev" "$dest"
+    [ "$rotated_prev" = 1 ] && mv "$prev.old" "$prev"
+  fi
+  if [ "$had_plist" = 1 ]; then
+    cp -p "$plist.backup" "$plist" && rm -f "$plist.backup"
+  else
+    rm -f "$plist"
+  fi
+  rm -rf "$stage" "$plist.staging"
+  if [ "$had_current" = 1 ] && [ "$had_plist" = 1 ]; then
+    load || die "$1; previous copy and LaunchAgent restored but could NOT be loaded (run: launchctl bootstrap $domain $plist)"
+  fi
+  die "$1; previous copy and LaunchAgent restored"
+}
+
 if [ "$had_current" = 1 ]; then
-  mv "$prev" "$dest"
-  [ -d "$prev.old" ] && mv "$prev.old" "$prev"
-  load || true
+  rm -rf "$prev.old"
+  if [ -d "$prev" ]; then mv "$prev" "$prev.old" || die "could not set aside the old .previous"; rotated_prev=1; fi
+  mv "$dest" "$prev" || { [ "$rotated_prev" = 1 ] && mv "$prev.old" "$prev"; die "could not keep the current copy as .previous"; }
 fi
-die "could not load the new copy (kept as $dest.failed); previous copy restored"
+mv "$stage" "$dest" || restore "could not move the new copy into place"
+mv "$plist.staging" "$plist" || restore "could not publish the LaunchAgent"
+load || restore "could not load the new copy (kept as $dest.failed)"
+rm -rf "$prev.old" "$plist.backup"
+printf 'Installed %s; LaunchAgent %s loaded\n' "$dest" "$label"
