@@ -24,6 +24,10 @@ type Resident struct {
 	ID      string  `json:"id"`
 	Volumes []Grant `json:"volumes"`
 	Execute bool    `json:"execute"`
+	// Desktop is house-side only. The local half of desktop authority lives
+	// in desktop-scope.json and the timed switch, never in the ceiling, so
+	// state.json stays loadable by binaries that predate desktop control.
+	Desktop bool `json:"desktop,omitempty"`
 }
 
 type Policy struct {
@@ -103,4 +107,31 @@ func executes(p Policy, resident string) bool {
 func AllowsMove(local, remote Policy, resident, source, destination string) bool {
 	return Allows(local, remote, resident, source, Write) &&
 		Allows(local, remote, resident, destination, Write)
+}
+
+// RemoteAllowsDesktop reads only the house grant. Desktop is never implied by
+// read, write or execute, and never implies them.
+func RemoteAllowsDesktop(remote Policy, resident string) bool {
+	if remote.Validate() != nil || resident == "" {
+		return false
+	}
+	for _, r := range remote.Residents {
+		if r.ID == resident {
+			return r.Desktop
+		}
+	}
+	return false
+}
+
+// LocalCeilingValid refuses a local ceiling that tries to carry desktop.
+func LocalCeilingValid(p Policy) error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	for _, r := range p.Residents {
+		if r.Desktop {
+			return errors.New("desktop authority is local scope + switch, not the ceiling")
+		}
+	}
+	return nil
 }

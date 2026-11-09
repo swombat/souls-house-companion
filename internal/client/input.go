@@ -13,8 +13,11 @@ import (
 
 func validDeadline(r Request, now time.Time) bool {
 	maximum := 31 * time.Second
-	if r.Operation == "execute" {
+	switch r.Operation {
+	case "execute":
 		maximum = 301 * time.Second
+	case "desktop":
+		maximum = 121 * time.Second
 	}
 	return r.Deadline.After(now) && !r.Deadline.After(now.Add(maximum))
 }
