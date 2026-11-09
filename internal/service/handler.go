@@ -36,6 +36,14 @@ func (h *Handler) AuthorizeInput(request client.Request, ceiling policy.Policy) 
 		if executeLifecycleAllowed(h.ExecuteLifecycle) && policy.AllowsExecute(ceiling, request.Policy, request.ResidentID) {
 			return nil
 		}
+	case "desktop":
+		// The full desktop payload is fetched once over HTTP, never carried on
+		// Cable; the house grant is checked before it is downloaded and every
+		// local check runs again before anything acts.
+		if h.Desktop != nil && policy.RemoteAllowsDesktop(request.Policy, request.ResidentID) &&
+			h.Desktop.ReadyFor(request.ResidentID) == "" {
+			return nil
+		}
 	}
 	return ErrDenied
 }
@@ -79,7 +87,12 @@ func (h *Handler) handle(ctx context.Context, request client.Request, ceiling po
 		// Independent authority: neither read/write nor execute implies it.
 		result := desktop.Result{Status: "refused", Reason: desktop.ReasonPlatform}
 		if h.Desktop != nil {
-			result = h.Desktop.Do(ctx, request.ResidentID, request.Policy, request.Arguments)
+			// Only the fetched payload is a command; the envelope's arguments
+			// are a receipt (verbs, apps, size) and never run.
+			result = desktop.Result{Status: "refused", Reason: desktop.ReasonInvalid}
+			if request.InputRequired && request.Input != nil {
+				result = h.Desktop.Do(ctx, request.ResidentID, request.Policy, request.Input)
+			}
 		}
 		data, err := json.Marshal(result)
 		return data, "json", err

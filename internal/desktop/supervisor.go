@@ -110,6 +110,21 @@ func (s *Supervisor) localAuthority(resident string, steps []Step, generation st
 	return sw, reason
 }
 
+// ReadyFor reports whether the local half of desktop authority (scope lists
+// the resident, switch on, not paused) would admit anything at all. It runs
+// before the payload is downloaded; Do checks everything again on the payload.
+func (s *Supervisor) ReadyFor(resident string) string {
+	if s.Paused != nil && s.Paused() != nil {
+		return ReasonPaused
+	}
+	scope, err := LoadScope(s.StateDir)
+	if err != nil || len(scope.Apps(resident)) == 0 {
+		return ReasonNotInScope
+	}
+	_, reason := State(s.StateDir, s.now())
+	return reason
+}
+
 // Do runs a parsed request. It always returns a result to report; the error
 // is only for supervision failures the caller should surface as such.
 func (s *Supervisor) Do(ctx context.Context, resident string, remote policy.Policy, raw json.RawMessage) Result {
