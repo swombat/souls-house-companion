@@ -15,6 +15,60 @@ let clock: DateFormatter = {
     return f
 }()
 
+// The souls.house mark (roof over a coral orb), drawn for the menu bar.
+// On: the orb is filled. Off: the orb is a ring. Unknown: the ring is grey.
+// The roof uses the label colour so it follows light and dark menu bars.
+enum HouseMark {
+    case on, off, unknown
+
+    var toolTip: String {
+        switch self {
+        case .on: return "souls.house: desktop control on"
+        case .off: return "souls.house: desktop control off"
+        case .unknown: return "souls.house: desktop control state unknown"
+        }
+    }
+}
+
+let houseCoral = NSColor(srgbRed: 0xf1 / 255.0, green: 0x5d / 255.0, blue: 0x61 / 255.0, alpha: 1)
+
+func houseMark(_ mark: HouseMark) -> NSImage {
+    // Logo viewBox is 240 x 210; scale it to the menu bar's 18 pt glyph height.
+    let scale: CGFloat = 18.0 / 210.0
+    let size = NSSize(width: 240 * scale, height: 18)
+    let image = NSImage(size: size, flipped: true) { _ in
+        let roof = NSBezierPath()
+        roof.move(to: NSPoint(x: 16 * scale, y: 100 * scale))
+        roof.line(to: NSPoint(x: 120 * scale, y: 24 * scale))
+        roof.line(to: NSPoint(x: 224 * scale, y: 100 * scale))
+        roof.lineWidth = 26 * scale
+        roof.lineCapStyle = .round
+        roof.lineJoinStyle = .round
+        NSColor.labelColor.setStroke()
+        roof.stroke()
+
+        let ringWidth = 22 * scale
+        switch mark {
+        case .on:
+            let r = 58 * scale
+            let orb = NSBezierPath(ovalIn: NSRect(x: 120 * scale - r, y: 148 * scale - r, width: 2 * r, height: 2 * r))
+            houseCoral.setFill()
+            orb.fill()
+        case .off, .unknown:
+            // Keep the ring inside the filled orb's outline so the mark doesn't grow.
+            let r = 58 * scale - ringWidth / 2
+            let orb = NSBezierPath(ovalIn: NSRect(x: 120 * scale - r, y: 148 * scale - r, width: 2 * r, height: 2 * r))
+            orb.lineWidth = ringWidth
+            (mark == .off ? houseCoral : NSColor.secondaryLabelColor).setStroke()
+            orb.stroke()
+        }
+        return true
+    }
+    image.isTemplate = false
+    image.accessibilityDescription = mark.toolTip
+    return image
+}
+
 final class Menu: NSObject, NSMenuDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let menu = NSMenu()
@@ -58,7 +112,10 @@ final class Menu: NSObject, NSMenuDelegate {
     func build() {
         let on: Bool
         if case .on = snapshot.desktop { on = true } else { on = false }
-        item.button?.title = on ? "⌂●" : (snapshot.desktop == .unknown ? "⌂?" : "⌂")
+        let mark: HouseMark = on ? .on : (snapshot.desktop == .unknown ? .unknown : .off)
+        item.button?.title = ""
+        item.button?.image = houseMark(mark)
+        item.button?.toolTip = mark.toolTip
         menu.removeAllItems()
         if !snapshot.companionReachable {
             menu.addItem(disabled("Companion not answering"))
