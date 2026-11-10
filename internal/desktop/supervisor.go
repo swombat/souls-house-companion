@@ -170,6 +170,21 @@ func (s *Supervisor) Do(ctx context.Context, resident string, remote policy.Poli
 			result.Status, result.Reason = "stopped", ReasonUnavailable
 			return result
 		}
+		if step.Command == "press" {
+			// A headless press goes to the app's process, not to a window:
+			// agent-desktop delivers it to whatever element the app reports
+			// as focused, which may be in a window the owner is using. Only
+			// an app with exactly one visible window gives the key a single
+			// place to land.
+			if n := s.visibleWindows(ctx, resident, generation, step.App, root); n != 1 {
+				appendAudit(s.StateDir, AuditEntry{Time: s.now().UTC(), Resident: resident, App: step.App, Command: step.Command, Outcome: ReasonKeyboardAmbiguous})
+				if len(result.Steps) == 0 {
+					return refused(ReasonKeyboardAmbiguous)
+				}
+				result.Status, result.Reason = "stopped", ReasonKeyboardAmbiguous
+				return result
+			}
+		}
 		sr, stop := s.run(ctx, resident, generation, step, root)
 		result.Steps = append(result.Steps, sr)
 		outcome := "exit_" + strconv.Itoa(sr.ExitCode)
@@ -187,6 +202,33 @@ func (s *Supervisor) Do(ctx context.Context, resident string, remote policy.Poli
 		}
 	}
 	return result
+}
+
+// visibleWindows counts the app's visible windows, or returns -1 when the
+// list cannot be read. It fails closed: anything but a clean list is not one.
+func (s *Supervisor) visibleWindows(ctx context.Context, resident, generation, app, root string) int {
+	probe := Step{Command: "list-windows", App: app, argv: []string{"list-windows", "--app=" + app}}
+	sr, stop := s.run(ctx, resident, generation, probe, root)
+	if stop != "" || sr.ExitCode != 0 || sr.Output == nil {
+		return -1
+	}
+	var out struct {
+		OK   bool `json:"ok"`
+		Data []struct {
+			AppName string `json:"app_name"`
+			Visible bool   `json:"visible"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(sr.Output, &out) != nil || !out.OK {
+		return -1
+	}
+	n := 0
+	for _, w := range out.Data {
+		if w.AppName == app && w.Visible {
+			n++
+		}
+	}
+	return n
 }
 
 func (s *Supervisor) lock(ctx context.Context) bool {

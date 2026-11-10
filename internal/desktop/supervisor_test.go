@@ -3,6 +3,7 @@ package desktop
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,7 @@ env > "$dir/env"
 if [ -f "$dir/ref" ]; then had=yes; else had=no; fi
 echo kept > "$dir/ref"
 case "$*" in
+  list-windows*) cat "$HOME/windows.json" 2>/dev/null || printf 'not json'; exit 0 ;;
   *sleeper*) sleep 30 & echo $! > "$dir/child"; sleep 30 ;;
   *orphan*) sleep 30 & echo $! > "$dir/child" ;;
 esac
@@ -326,5 +328,74 @@ func TestARefCannotBeUsedUnderAnotherApp(t *testing.T) {
 	r = f.do(`{"command":"click","app":"Notes","ref":"@notesnap:e1"}`)
 	if !strings.Contains(string(r.Steps[0].Output), `"had_ref":"yes"`) {
 		t.Fatalf("Notes lost its own store: %+v", r)
+	}
+}
+
+// A headless press lands on whatever element the app reports as focused, in
+// any of its windows. With more than one visible window that can be a window
+// the owner is typing in, so the press is refused before any key is sent.
+func TestPressNeedsExactlyOneVisibleWindow(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	win := func(name string, visible bool) string {
+		return fmt.Sprintf(`{"app_name":%q,"visible":%t,"id":"w-1"}`, name, visible)
+	}
+	cases := []struct {
+		name    string
+		windows string // "" means the list cannot be read
+		ran     bool
+	}{
+		{"one window", `{"ok":true,"data":[` + win("Finder", true) + `]}`, true},
+		{"one visible, one hidden, another app's", `{"ok":true,"data":[` + win("Finder", true) + `,` + win("Finder", false) + `,` + win("Finder Helper", true) + `]}`, true},
+		{"two visible windows", `{"ok":true,"data":[` + win("Finder", true) + `,` + win("Finder", true) + `]}`, false},
+		{"no window", `{"ok":true,"data":[]}`, false},
+		{"list not ok", `{"ok":false,"data":[` + win("Finder", true) + `]}`, false},
+		{"unreadable list", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.on(time.Hour)
+			path := filepath.Join(home, "windows.json")
+			_ = os.Remove(path)
+			if c.windows != "" {
+				if err := os.WriteFile(path, []byte(c.windows), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			res := f.do(`{"command":"press","app":"Finder","combo":"return"}`)
+			argv, _ := os.ReadFile(filepath.Join(f.root(), "state", "argv"))
+			pressed := strings.HasPrefix(string(argv), "press\n")
+			if c.ran {
+				if res.Status != "completed" || !pressed {
+					t.Fatalf("want press delivered, got %+v argv %q", res, argv)
+				}
+				return
+			}
+			if res.Status != "refused" || res.Reason != ReasonKeyboardAmbiguous {
+				t.Fatalf("want refused %s, got %+v", ReasonKeyboardAmbiguous, res)
+			}
+			if pressed || !strings.HasPrefix(string(argv), "list-windows\n--app=Finder\n") {
+				t.Fatalf("no key may be sent; last argv %q", argv)
+			}
+			if last := LastAction(f.dir); last == nil || last.Outcome != ReasonKeyboardAmbiguous {
+				t.Fatalf("refusal must be audited, got %+v", last)
+			}
+		})
+	}
+}
+
+func TestPressAfterOtherStepsStopsTheBatchWhenAmbiguous(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	two := `{"ok":true,"data":[{"app_name":"Finder","visible":true},{"app_name":"Finder","visible":true}]}`
+	if err := os.WriteFile(filepath.Join(home, "windows.json"), []byte(two), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t)
+	f.on(time.Hour)
+	res := f.do(`{"command":"batch","steps":[` + snap + `,{"command":"press","app":"Finder","combo":"return"},` + snap + `]}`)
+	if res.Status != "stopped" || res.Reason != ReasonKeyboardAmbiguous || len(res.Steps) != 1 {
+		t.Fatalf("want stopped after the snapshot, got %+v", res)
 	}
 }
