@@ -79,7 +79,36 @@ regular), never guesses it, and relaunches over a stale one. The URL is loaded
 over the DevTools protocol: `Page.navigate` in the first existing tab, or
 `Target.createTarget {background: true}` when there is none. No process is
 brought forward and no key is sent. The scope must list `souls.house browser`
-itself; listing Google Chrome does not imply it, and no other verb accepts it.
+itself; listing Google Chrome does not imply it.
+
+Residents also read and act in its first tab, again only over DevTools,
+never through agent-desktop or the window server:
+
+- `snapshot` (`interactive` optional): the tab's URL, title and main-frame
+  accessibility tree in document order, as `{ref, role, name, value, depth}`
+  entries. Ignored and unnamed structural nodes are dropped, as are text
+  nodes repeating their parent. At most 1500 elements (`truncated: true`
+  beyond), names cut at 300 bytes. `interactive: true` keeps links, buttons,
+  fields and other controls only.
+- `click` `ref`: scrolls the element into view and calls its `click()`.
+- `type` `ref` `text`: focuses the element (refused as `not_focusable` if focus
+  does not land on it) and inserts the text with `Input.insertText`. The text
+  is not echoed or audited.
+- `press` `combo`: one of `return`/`enter`, `tab`, `escape`, `backspace`,
+  `space`, the arrows, `pageup`, `pagedown`, `home`, `end`, with no modifiers,
+  dispatched to that tab only. Unlike `press` on other apps, which stays
+  refused, no key can reach another app or the browser's own menus.
+
+A ref is `@b<12 hex>:e<backend node id>`. The prefix is a hash of the
+resident, the on-period and the page load (`loaderId`) it was read from, and
+an act re-derives it: a ref from an earlier page, another on-period or another
+resident is refused as `stale_ref` before anything is resolved. Authority is
+checked again immediately before the one call that clicks, inserts or sends a
+key. `find`, `get`, `is` and `scroll` are not offered for the resident browser.
+
+Measured on the owner's Mac (10 Nov, real Chrome, WezTerm in front, sampled
+every 100 ms): open, read, type into a search box, press Enter, click a link,
+read again, and a stale ref refused; the front app never changed.
 
 Authority is watched for the whole step, as for agent-desktop calls: a
 switch-off, expiry, pause, scope edit or new on-period while the browser is
