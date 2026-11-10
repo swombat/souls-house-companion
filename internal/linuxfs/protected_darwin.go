@@ -244,7 +244,9 @@ func (r *Root) checkDirectory(fd int) error {
 
 // directChildOfRoot reports whether a directory with identity id is an entry
 // of the root itself, by statting the root's own entries without following
-// links. A rename racing the scan makes it false, which fails closed.
+// links. Like the rest of this engine it is not transactional against a
+// concurrent local writer (README_darwin.md): a rename after the candidate is
+// opened can leave a matching identity that is no longer a root entry.
 func (r *Root) directChildOfRoot(id inode) (bool, error) {
 	dir, err := openComponent(r.fd, ".", true)
 	if err != nil {
