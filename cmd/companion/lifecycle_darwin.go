@@ -278,9 +278,75 @@ func prepareProtectedPaths(home, dir, unit, exe string) ([]string, error) {
 	if err != nil || !st.IsDir() {
 		return nil, errors.New("LaunchAgents must be a real directory")
 	}
+	signing, err := prepareSigningDir(home)
+	if err != nil {
+		return nil, err
+	}
+	leaves, err := existingSigningLeaves(signing)
+	if err != nil {
+		return nil, err
+	}
 	// Entire LaunchAgents subtree prevents sibling-plist persistence through
-	// the filesystem tool. Execute still has full user authority, by design.
-	return []string{dir, filepath.Join(dir, "state.json"), unit, exe, agents}, nil
+	// the filesystem tool. The signing subtree holds the local code-signing
+	// key (scripts/sign-macos.sh): whoever can read it can sign a replacement
+	// binary that keeps this Mac's Accessibility grant, so residents may not
+	// read, copy or change it. Execute still has full user authority, by design.
+	// Directory protection follows current ancestry only, so the keychain and
+	// its password are also pinned by their own identities: a hardlink to
+	// either, made anywhere else on the volume, is refused as the file itself.
+	paths := []string{dir, filepath.Join(dir, "state.json"), unit, exe, agents, signing}
+	return append(paths, leaves...), nil
+}
+
+// signingDirName is the owner's local signing home, shared with
+// scripts/sign-macos.sh (which keeps its keychain under "signing" inside it).
+const signingDirName = "Library/Application Support/souls-house"
+
+// signingLeafNames are what scripts/sign-macos.sh keeps under
+// <signing home>/signing. Each is pinned by its own identity when it exists.
+// A key first created after the service starts is pinned at the next start;
+// signing is always followed by swapping in the signed build and restarting.
+var signingLeafNames = []string{
+	"signing",
+	"signing/companion-signing.keychain-db",
+	"signing/keychain-password",
+}
+
+// existingSigningLeaves returns the signing entries that exist now. A
+// symlink, or the wrong file type where a key file should be, fails closed.
+func existingSigningLeaves(signing string) ([]string, error) {
+	var leaves []string
+	for _, name := range signingLeafNames {
+		path := filepath.Join(signing, filepath.FromSlash(name))
+		st, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		wantDir := name == "signing"
+		if st.Mode()&os.ModeSymlink != 0 || (wantDir && !st.IsDir()) || (!wantDir && !st.Mode().IsRegular()) {
+			return nil, errors.New("signing files must be real files and directories")
+		}
+		leaves = append(leaves, path)
+	}
+	return leaves, nil
+}
+
+// prepareSigningDir makes sure the signing home exists as a real 0700
+// directory, so it has an identity to pin before the first resident request,
+// even on a Mac where the owner has not signed anything yet.
+func prepareSigningDir(home string) (string, error) {
+	path := filepath.Join(home, filepath.FromSlash(signingDirName))
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return "", err
+	}
+	st, err := os.Lstat(path)
+	if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("signing directory must be a real directory")
+	}
+	return path, nil
 }
 
 var _ io.Writer = (*limitedManagerOutput)(nil)
