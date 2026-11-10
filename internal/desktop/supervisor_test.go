@@ -1,8 +1,10 @@
 package desktop
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -280,6 +282,52 @@ func privateTemp(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+func TestRestartKeepsAnUnexpiredSwitchUnchanged(t *testing.T) {
+	now := time.Now()
+	path := func(dir string) string { return filepath.Join(dir, SwitchFile) }
+	cases := []struct {
+		name     string
+		setup    func(dir string)
+		at       time.Time
+		wantKept bool
+	}{
+		{"until-off", func(d string) { TurnOn(d, now, 0, true) }, now.Add(100 * time.Hour), true},
+		{"timed, unexpired", func(d string) { TurnOn(d, now, 30*time.Minute, false) }, now.Add(29 * time.Minute), true},
+		{"timed, expired", func(d string) { TurnOn(d, now, 30*time.Minute, false) }, now.Add(30 * time.Minute), false},
+		{"invalid", func(d string) {
+			os.WriteFile(path(d), []byte(`{"version":1,"set_at":"2026-11-09T00:00:00Z","until_off":true,"x":1}`), 0600)
+		}, now, false},
+		{"world-readable", func(d string) { TurnOn(d, now, 0, true); os.Chmod(path(d), 0644) }, now, false},
+		{"absent", func(string) {}, now, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := privateTemp(t)
+			c.setup(dir)
+			before, _ := os.ReadFile(path(dir))
+			if err := ReconcileAtStartup(dir, c.at); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(path(dir))
+			if !c.wantKept {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("switch survived restart: %s", after)
+				}
+				if _, r := State(dir, c.at); r != ReasonSwitchOff {
+					t.Fatal(r)
+				}
+				return
+			}
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("switch changed across restart: %s -> %s (%v)", before, after, err)
+			}
+			if s, r := State(dir, c.at); r != "" || s.Generation() != now.UTC().Format(time.RFC3339Nano) {
+				t.Fatalf("generation or state changed: %q %q", s.Generation(), r)
+			}
+		})
+	}
 }
 
 func TestQueuedWorkDoesNotCrossAnOffOnBoundary(t *testing.T) {

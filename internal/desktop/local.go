@@ -168,6 +168,16 @@ func TurnOff(dir string) error {
 	return nil
 }
 
+// ReconcileAtStartup keeps a switch that is still on at now, unchanged: same
+// set_at (so the same generation) and the same expiry, never extended. A
+// switch that is expired, invalid or unreadable is removed. Absence stays off.
+func ReconcileAtStartup(dir string, now time.Time) error {
+	if _, reason := State(dir, now); reason == "" {
+		return nil
+	}
+	return TurnOff(dir)
+}
+
 func LoadScope(dir string) (Scope, error) {
 	var s Scope
 	data, err := readPrivate(filepath.Join(dir, ScopeFile))

@@ -35,8 +35,10 @@ souls-house-companion desktop off
 ```
 
 These need no state lock, so the menu bar can drive them while the service
-runs. The service removes the switch and every resident's refs at start: a
-restart always comes up off.
+runs. At start the service keeps a switch that is still on exactly as it was
+(same expiry, same on-period, never extended) and removes one that has expired
+or does not validate. Every resident's refs are dropped at start either way,
+and nothing in flight survives the old process.
 
 ## Grammar
 

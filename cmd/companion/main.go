@@ -331,9 +331,11 @@ func serve(dir, unit string) error {
 	if err != nil {
 		return err
 	}
-	// Desktop control always starts off: a restart drops the switch and every
-	// resident's refs. A failure to drop them refuses to serve.
-	if err := errors.Join(desktop.TurnOff(dir), desktop.WipeRoots(dir)); err != nil {
+	// A restart keeps an unexpired switch as it was (same expiry, same
+	// generation) and removes an expired or invalid one. Every resident's
+	// refs are dropped either way, and nothing in flight survives the old
+	// process. A failure to reconcile or drop them refuses to serve.
+	if err := errors.Join(desktop.ReconcileAtStartup(dir, time.Now()), desktop.WipeRoots(dir)); err != nil {
 		return err
 	}
 	handler := &service.Handler{ProtectedPaths: protectedPaths, ExecuteLifecycle: state.ExecuteLifecycle,
