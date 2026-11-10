@@ -88,7 +88,7 @@ func awaitShutdown(t *testing.T, ch <-chan struct{}, what string) {
 
 func TestRunOnceDrainsOnlyProcessWorkersOnEveryConnectionExit(t *testing.T) {
 	for _, op := range []string{"execute", "desktop"} {
-		for _, exit := range []string{"cancel", "local-pause", "pause", "revoke", "disconnect", "reject", "malformed", "invalid-request", "socket-close"} {
+		for _, exit := range []string{"cancel", "local-pause", "pause", "revoke", "disconnect", "disconnect-reconnect", "reject", "malformed", "invalid-request", "socket-close"} {
 			t.Run(op+"/"+exit, func(t *testing.T) {
 				executeStarted, filesystemStarted := make(chan struct{}), make(chan struct{})
 				cleanupStarted, releaseExecute, releaseFilesystem := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -135,6 +135,8 @@ func TestRunOnceDrainsOnlyProcessWorkersOnEveryConnectionExit(t *testing.T) {
 					terminal <- []byte(`{"message":{"type":"` + exit + `"}}`)
 				case "disconnect":
 					terminal <- []byte(`{"type":"disconnect"}`)
+				case "disconnect-reconnect":
+					terminal <- []byte(`{"type":"disconnect","reason":"remote","reconnect":true}`)
 				case "reject":
 					terminal <- []byte(`{"type":"reject_subscription"}`)
 				case "malformed":
@@ -155,6 +157,10 @@ func TestRunOnceDrainsOnlyProcessWorkersOnEveryConnectionExit(t *testing.T) {
 				case err := <-done:
 					if !errors.Is(err, ErrTransport) || errors.Is(err, ErrExecuteShutdown) {
 						t.Fatalf("unexpected drained connection result: %v", err)
+					}
+					// Only the house's own reconnect request comes back fast.
+					if errors.Is(err, ErrReconnect) != (exit == "disconnect-reconnect") {
+						t.Fatalf("reconnect request misread for %s: %v", exit, err)
 					}
 				case <-time.After(time.Second):
 					t.Fatal("execute cleanup waited for abandoned filesystem worker")

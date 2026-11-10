@@ -27,6 +27,12 @@ var ErrTransport = errors.New("companion transport refused")
 var ErrPaused = errors.New("companion paused")
 var ErrAuthority = errors.New("companion authority refused")
 
+// ErrReconnect is the house closing this connection and asking for a new one,
+// as it does after an owner changes a resident's permissions. The owner is
+// usually watching the Computers page, so the companion comes back promptly.
+// It is still a transport exit: every drain and shutdown rule for one applies.
+var ErrReconnect = fmt.Errorf("%w: house asked for a new connection", ErrTransport)
+
 // ErrExecuteShutdown means an execute or desktop worker exceeded the shutdown grace.
 // Returning from RunOnce is not proof that its transient unit is quiescent.
 var ErrExecuteShutdown = errors.New("companion execute shutdown incomplete")
@@ -265,8 +271,9 @@ func (c *Client) runOnce(ctx context.Context, state *State, shutdownGrace time.D
 			return ErrTransport
 		}
 		var frame struct {
-			Type    string          `json:"type"`
-			Message json.RawMessage `json:"message"`
+			Type      string          `json:"type"`
+			Message   json.RawMessage `json:"message"`
+			Reconnect bool            `json:"reconnect"`
 		}
 		if json.Unmarshal(raw, &frame) != nil {
 			return ErrTransport
@@ -276,7 +283,12 @@ func (c *Client) runOnce(ctx context.Context, state *State, shutdownGrace time.D
 			// Action Cable control frames are not application payloads. In
 			// particular ping.message is a Unix timestamp, not a Request.
 			continue
-		case "disconnect", "reject_subscription":
+		case "disconnect":
+			if frame.Reconnect {
+				return ErrReconnect
+			}
+			return ErrTransport
+		case "reject_subscription":
 			return ErrTransport
 		case "":
 			// Channel transmissions have no top-level type.

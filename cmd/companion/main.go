@@ -405,6 +405,9 @@ func serve(dir, unit string) error {
 			return runErr
 		}
 		delay := 10 * time.Second
+		if errors.Is(runErr, client.ErrReconnect) {
+			delay = time.Second
+		}
 		if errors.Is(runErr, client.ErrPaused) || errors.Is(runErr, client.ErrAuthority) {
 			delay = 5 * time.Minute
 		}
