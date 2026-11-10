@@ -15,11 +15,21 @@ import (
 )
 
 func frontApp(t *testing.T) string {
-	out, err := exec.Command("/usr/bin/lsappinfo", "info", "-only", "name", "front").Output()
+	asn, err := exec.Command("/usr/bin/lsappinfo", "front").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return strings.TrimSpace(string(out))
+	out, err := exec.Command("/usr/bin/lsappinfo", "info", "-only", "name", strings.TrimSpace(string(asn))).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// First line: "Name" ASN:… (in front)
+	line := strings.SplitN(string(out), "\n", 2)[0]
+	if i, j := strings.Index(line, `"`), strings.LastIndex(line, `"`); i >= 0 && j > i {
+		return line[i+1 : j]
+	}
+	t.Fatalf("no front app in %q", out)
+	return ""
 }
 
 // TestRealResidentBrowserKeepsFocus drives a real Google Chrome. It runs only
@@ -42,6 +52,9 @@ func TestRealResidentBrowserKeepsFocus(t *testing.T) {
 			if pid, err := strconv.Atoi(lock[strings.LastIndex(lock, "-")+1:]); err == nil && pid > 1 {
 				if p, err := os.FindProcess(pid); err == nil {
 					_ = p.Signal(syscall.SIGTERM)
+					for i := 0; i < 50 && p.Signal(syscall.Signal(0)) == nil; i++ {
+						time.Sleep(100 * time.Millisecond)
+					}
 				}
 			}
 		}
