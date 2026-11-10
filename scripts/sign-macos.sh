@@ -15,7 +15,9 @@
 # Accessibility grant, which a replacement ad-hoc binary would lose. So the
 # companion treats ~/Library/Application Support/souls-house as protected:
 # residents cannot read, copy, change, move or trash it through the
-# filesystem tool (by path or alias). Anything running as the owner outside
+# filesystem tool (by path, case alias, or a hardlink to the keychain or its
+# password: those files are pinned by identity at service start, so restart
+# the companion after a first-ever signing). Anything running as the owner outside
 # the companion's tools (including resident `execute`, which is full user
 # authority by design) can still reach it.
 #
