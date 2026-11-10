@@ -53,8 +53,16 @@ TCC may deny Documents/Desktop/Downloads, removable/network volumes and iCloud.
 A background agent cannot show an interactive prompt. EPERM/EACCES receipts
 say `os_permission_denied` with possible TCC/POSIX/ACL causes, separately from
 a grant refusal; errno alone cannot prove TCC. Full Disk Access is the owner's
-choice. Ad-hoc cdhash changes each build; permissions may need reapproval for
-the new binary after upgrades. Verify instead of assuming they transfer.
+choice. Ad-hoc cdhash changes each build, so permissions granted to one build
+do not cover the next: the Settings switch still shows on, but the row is bound
+to the old hash. To keep one grant across upgrades, sign every installed build
+with `scripts/sign-macos.sh <binary>` before swapping it in. It creates one
+self-signed local identity on first use (its own keychain under
+`~/Library/Application Support/souls-house/signing/`), so the designated
+requirement becomes `identifier "house.souls.companion" and certificate leaf`,
+the same for every build. The first grant after switching to it still needs
+remove (−) and re-add (+). Verify `accessibility.trusted` after each upgrade
+instead of assuming it transferred.
 
 Binary/plist/state/credential and LaunchAgents are protected by opened identity
 from filesystem tools, including case/Unicode aliases. This is **not a
