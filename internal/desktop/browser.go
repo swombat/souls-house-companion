@@ -25,7 +25,8 @@ import (
 // background targets, so nothing is brought to the front and no keystroke is
 // sent. Measured on the owner's Mac (10 Nov): Launch Services `open -g -n`
 // and DevTools navigation kept the frontmost app unchanged, where opening a
-// URL in the owner's Chrome brought Chrome forward every time.
+// URL in the owner's Chrome brought Chrome forward every time. Starting the
+// browser with a window also brought it forward, so it starts with none.
 const ResidentBrowser = "souls.house browser"
 
 const (
@@ -56,7 +57,9 @@ func (s *Supervisor) launchBrowser(ctx context.Context, profile string) error {
 		"--remote-debugging-port=0",
 		"--remote-debugging-address=127.0.0.1",
 		"--no-first-run", "--no-default-browser-check",
-		"about:blank")
+		// A window at startup is brought to the front, -g or not
+		// (measured); with none, the first open creates a background tab.
+		"--no-startup-window")
 	cmd.Env = []string{"HOME=" + os.Getenv("HOME"), "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=en_US.UTF-8"}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd.Run()

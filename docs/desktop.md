@@ -68,7 +68,9 @@ or not.
 `open` with `app` = `souls.house browser` does not touch the owner's apps. The
 companion keeps its own Google Chrome instance with a separate profile in
 `<state>/browser` (0700), started with `open -g -n -a "Google Chrome" --args
---user-data-dir=… --remote-debugging-port=0 --remote-debugging-address=127.0.0.1`.
+--user-data-dir=… --remote-debugging-port=0 --remote-debugging-address=127.0.0.1
+--no-startup-window` (a startup window comes to the front even with `-g`;
+measured 10 Nov).
 Chrome picks the port and writes it to `DevToolsActivePort` in that profile;
 the companion reads it there (profile private and ours, file ours and
 regular), never guesses it, and relaunches over a stale one. The URL is loaded
