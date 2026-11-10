@@ -36,7 +36,9 @@ const (
 type Supervisor struct {
 	StateDir string
 	Binary   string // absolute path to the installed agent-desktop
-	Now      func() time.Time
+	// Opener runs the open verb; empty means /usr/bin/open.
+	Opener string
+	Now    func() time.Time
 	// Paused reports local denial (marker or state); nil means not paused.
 	Paused func() error
 	// Platform overrides runtime.GOOS in tests.
@@ -281,7 +283,14 @@ func (s *Supervisor) run(parent context.Context, resident, generation string, st
 			}
 		}
 	}()
-	cmd := exec.Command(s.Binary, step.argv...)
+	bin := s.Binary
+	if step.opener {
+		bin = s.Opener
+		if bin == "" {
+			bin = "/usr/bin/open"
+		}
+	}
+	cmd := exec.Command(bin, step.argv...)
 	cmd.Dir = root
 	cmd.Env = []string{
 		"HOME=" + os.Getenv("HOME"),
