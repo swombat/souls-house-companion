@@ -59,8 +59,29 @@ can become a flag. Waits ≤30 s, `find` limit ≤200 (default 50),
 agent-desktop: Launch Services hands the URL to the app without bringing it
 forward, and no key is sent. Only absolute `http`/`https` URLs with a host,
 no userinfo, in printable ASCII (percent-encoded), ≤2048 bytes. A browser
-opens it as a new tab in its front window, which may be the owner's; whether
-focus stays put is measured at acceptance, not assumed from `-g`.
+opens it as a new tab in its front window, which may be the owner's. Measured
+on the owner's Mac (10 Nov 2026): Chrome comes to the front every time, `-g`
+or not.
+
+### The resident browser
+
+`open` with `app` = `souls.house browser` does not touch the owner's apps. The
+companion keeps its own Google Chrome instance with a separate profile in
+`<state>/browser` (0700), started with `open -g -n -a "Google Chrome" --args
+--user-data-dir=… --remote-debugging-port=0 --remote-debugging-address=127.0.0.1`.
+Chrome picks the port and writes it to `DevToolsActivePort` in that profile;
+the companion reads it there (profile private and ours, file ours and
+regular), never guesses it, and relaunches over a stale one. The URL is loaded
+over the DevTools protocol: `Page.navigate` in the first existing tab, or
+`Target.createTarget {background: true}` when there is none. No process is
+brought forward and no key is sent. The scope must list `souls.house browser`
+itself; listing Google Chrome does not imply it, and no other verb accepts it.
+
+Exposure: the DevTools port listens on 127.0.0.1 only, but any local process
+of the owner's user can drive that browser while it runs (as it could already
+read the profile). The profile holds only what residents did in it, never the
+owner's sessions. The browser outlives the call; the owner closes it like any
+window, and the next `open` starts it again.
 
 ## Process lifetime
 
