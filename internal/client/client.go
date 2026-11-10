@@ -362,6 +362,29 @@ func (c *Client) runOnce(ctx context.Context, state *State, shutdownGrace time.D
 
 var errUnavailable = errors.New("companion worker capacity unavailable")
 
+// ErrorClassifier is optionally implemented by a Handler to name why an
+// operation was refused. Only the fixed codes in safeErrorCodes ever leave the
+// device; anything else, including an empty or unknown answer, is "failed".
+type ErrorClassifier interface {
+	ErrorCode(error) string
+}
+
+var safeErrorCodes = map[string]bool{
+	"protected": true, "denied": true, "symlink": true, "not_found": true,
+}
+
+func (c *Client) errorCode(failure error) string {
+	if errors.Is(failure, errUnavailable) {
+		return "unavailable"
+	}
+	if classifier, ok := c.Handler.(ErrorClassifier); ok {
+		if code := classifier.ErrorCode(failure); safeErrorCodes[code] {
+			return code
+		}
+	}
+	return "failed"
+}
+
 func (c *Client) result(ctx context.Context, state State, r Request, data []byte, format string, failure error) {
 	if failure != nil {
 		data = nil // Never deliver a partial payload on a failed operation.
@@ -377,11 +400,7 @@ func (c *Client) result(ctx context.Context, state State, r Request, data []byte
 	req.Header.Set("X-Companion-Revision", strconv.Itoa(r.Revision))
 	req.Header.Set("X-Companion-Format", format)
 	if failure != nil {
-		outcome := "failed"
-		if errors.Is(failure, errUnavailable) {
-			outcome = "unavailable"
-		}
-		req.Header.Set("X-Companion-Error", outcome)
+		req.Header.Set("X-Companion-Error", c.errorCode(failure))
 	}
 	res, err := c.HTTP.Do(req)
 	if err == nil {
