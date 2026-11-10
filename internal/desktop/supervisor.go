@@ -38,7 +38,10 @@ type Supervisor struct {
 	Binary   string // absolute path to the installed agent-desktop
 	// Opener runs the open verb; empty means /usr/bin/open.
 	Opener string
-	Now    func() time.Time
+	// BrowserLaunch starts the resident browser on a profile directory;
+	// nil means Google Chrome via the opener (tests substitute a fake).
+	BrowserLaunch func(ctx context.Context, profile string) error
+	Now           func() time.Time
 	// Paused reports local denial (marker or state); nil means not paused.
 	Paused func() error
 	// Platform overrides runtime.GOOS in tests.
@@ -185,7 +188,13 @@ func (s *Supervisor) Do(ctx context.Context, resident string, remote policy.Poli
 			result.Status, result.Reason = "stopped", ReasonKeyboardUntargeted
 			return result
 		}
-		sr, stop := s.run(ctx, resident, generation, step, root)
+		var sr StepResult
+		var stop string
+		if step.browser {
+			sr, stop = s.browse(ctx, resident, generation, step)
+		} else {
+			sr, stop = s.run(ctx, resident, generation, step, root)
+		}
 		result.Steps = append(result.Steps, sr)
 		outcome := "exit_" + strconv.Itoa(sr.ExitCode)
 		if stop != "" {
