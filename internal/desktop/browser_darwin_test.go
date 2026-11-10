@@ -4,6 +4,7 @@ package desktop
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,6 +93,58 @@ func TestRealResidentBrowserKeepsFocus(t *testing.T) {
 		}
 		time.Sleep(3 * time.Second)
 		t.Logf("open %d: %s", i, r.Steps[0].Output)
+	}
+	// Read, type, press and click, all in the background.
+	do := func(args string) json.RawMessage {
+		t.Helper()
+		r := f.sup.Do(context.Background(), "mira", f.remote, []byte(args))
+		if r.Status != "completed" || r.Steps[0].ExitCode != 0 {
+			t.Fatalf("%s: %+v %s", args, r, r.Steps[0].Output)
+		}
+		return r.Steps[0].Output
+	}
+	read := func(interactive bool) snapshotOut {
+		t.Helper()
+		var out snapshotOut
+		args := `{"command":"snapshot","app":"souls.house browser","interactive":` + strconv.FormatBool(interactive) + `}`
+		if err := json.Unmarshal(do(args), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	find := func(out snapshotOut, role, name string) string {
+		t.Helper()
+		for _, e := range out.Elements {
+			if e.Role == role && (name == "" || e.Name == name) && e.Ref != "" {
+				return e.Ref
+			}
+		}
+		t.Fatalf("no %s %q among %d elements of %q", role, name, len(out.Elements), out.Title)
+		return ""
+	}
+	page := read(false)
+	if !strings.Contains(page.Title, "Lichen") || len(page.Elements) < 50 {
+		t.Fatalf("read: title %q, %d elements", page.Title, len(page.Elements))
+	}
+	t.Logf("read %q: %d elements", page.Title, len(page.Elements))
+	box := find(read(true), "searchbox", "")
+	do(`{"command":"type","app":"souls.house browser","ref":"` + box + `","text":"Mycorrhiza"}`)
+	do(`{"command":"press","app":"souls.house browser","combo":"return"}`)
+	time.Sleep(4 * time.Second)
+	if page = read(false); !strings.Contains(page.Title, "Mycorrhiz") {
+		t.Fatalf("after search: title %q", page.Title)
+	}
+	t.Logf("typed and pressed: now %q", page.Title)
+	stale := find(page, "link", "")
+	do(`{"command":"click","app":"souls.house browser","ref":"` + find(read(true), "link", "fungus") + `"}`)
+	time.Sleep(4 * time.Second)
+	if page = read(false); !strings.Contains(page.Title, "Fung") {
+		t.Fatalf("after click: title %q", page.Title)
+	}
+	t.Logf("clicked: now %q", page.Title)
+	r := f.sup.Do(context.Background(), "mira", f.remote, []byte(`{"command":"click","app":"souls.house browser","ref":"`+stale+`"}`))
+	if r.Steps[0].ExitCode == 0 || !strings.Contains(string(r.Steps[0].Output), "stale_ref") {
+		t.Fatalf("ref from the previous page: %+v %s", r, r.Steps[0].Output)
 	}
 	close(stop)
 	<-sampled
