@@ -53,8 +53,8 @@ const (
 	ReasonPlatform       = "platform_not_supported"
 	ReasonStoppedMidCall = "stopped_during_call"
 	ReasonTimeout        = "timeout"
-	// A key press needs exactly one visible window of the app to land in.
-	ReasonKeyboardAmbiguous = "keyboard_target_ambiguous"
+	// A key press cannot yet be aimed at a verified element, so none is sent.
+	ReasonKeyboardUntargeted = "keyboard_target_unverified"
 )
 
 var appName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$`)
