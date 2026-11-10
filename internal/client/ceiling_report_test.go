@@ -37,7 +37,12 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 		}
 		// The very next frame after the subscription must be the report, and
 		// it can only name epoch-7 if it was built after "ready" arrived.
-		b, _ := json.Marshal(map[string]any{"message": Request{Type: "ready", DeviceID: "device", Epoch: "epoch-7"}})
+		// The house enrolled resA (with only one folder on) and resB here.
+		enrolled := policy.Policy{Residents: []policy.Resident{
+			{ID: "resA", Volumes: []policy.Grant{{Volume: "data-uuid", Access: policy.Read}}},
+			{ID: "resB", Volumes: []policy.Grant{}},
+		}}
+		b, _ := json.Marshal(map[string]any{"message": Request{Type: "ready", DeviceID: "device", Epoch: "epoch-7", Policy: enrolled}})
 		if err := ws.Write(ctx, websocket.MessageText, b); err != nil {
 			return
 		}
@@ -52,6 +57,7 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 	c.Save = func(State) error { return nil }
 	state := State{URL: server.URL, DeviceID: "device", Credential: "shcd_old", Ceiling: policy.Policy{Residents: []policy.Resident{
 		{ID: "resA", Execute: true, Volumes: []policy.Grant{{Volume: "data-uuid", Access: policy.Write}, {Volume: "home-uuid", Access: policy.Read}}},
+		{ID: "resX", Volumes: []policy.Grant{{Volume: "outsider-only-key", Access: policy.Write}}},
 		{ID: "resB", Volumes: []policy.Grant{}},
 	}}}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -72,6 +78,11 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 		!strings.Contains(frame.Identifier, "CompanionChannel") {
 		t.Fatalf("not a channel message: %s", raw)
 	}
+	// resX is in this Mac's local ceiling but not enrolled on this device:
+	// neither its ID nor its volume may reach the house.
+	if strings.Contains(string(raw), "resX") || strings.Contains(string(raw), "outsider-only-key") {
+		t.Fatalf("report disclosed a resident not enrolled on this device: %s", raw)
+	}
 	if strings.Contains(frame.Data, "execute") || strings.Contains(frame.Data, "desktop") {
 		t.Fatalf("report carries more than volume keys and access: %s", frame.Data)
 	}
@@ -91,6 +102,8 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 	if data.Action != "report_ceiling" || data.Epoch != "epoch-7" || len(data.Ceiling.Residents) != 2 {
 		t.Fatalf("wrong report: %+v", data)
 	}
+	// resA keeps every locally allowed volume, including home-uuid that the
+	// house has off: those are the choices the owner page offers.
 	a, b := data.Ceiling.Residents[0], data.Ceiling.Residents[1]
 	if a.ID != "resA" || len(a.Volumes) != 2 || a.Volumes[0] != (reportedVolume{"data-uuid", policy.Write}) ||
 		a.Volumes[1] != (reportedVolume{"home-uuid", policy.Read}) {
@@ -104,14 +117,17 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 }
 
 func TestCeilingReportNeedsAnEpochAndAValidCeiling(t *testing.T) {
-	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "", policy.Policy{}); err == nil {
+	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "", policy.Policy{}, policy.Policy{}); err == nil {
 		t.Fatal("reported without an epoch")
 	}
 	bad := policy.Policy{Residents: []policy.Resident{{ID: "r", Volumes: []policy.Grant{{Volume: "v", Access: "admin"}}}}}
-	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "epoch", bad); err == nil {
+	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "epoch", bad, policy.Policy{}); err == nil {
 		t.Fatal("reported an invalid ceiling")
 	}
-	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "epoch", policy.Policy{}); err != nil {
+	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "epoch", policy.Policy{}, bad); err == nil {
+		t.Fatal("reported against an invalid enrolled policy")
+	}
+	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "epoch", policy.Policy{}, policy.Policy{}); err != nil {
 		t.Fatalf("an empty ceiling must still be reportable: %v", err)
 	}
 }
