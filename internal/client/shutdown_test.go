@@ -54,9 +54,20 @@ func shutdownFixture(t *testing.T, h Handler, operations ...string) (*Client, St
 				send(Request{Type: "request", ID: string(rune('a' + i)), DeviceID: "device", Epoch: "epoch",
 					Operation: operation, Deadline: time.Now().Add(20 * time.Second)})
 			}
-			// CloseRead lets cancellation unblock this fixture even when the
-			// test does not inject a terminal frame.
-			ctx := ws.CloseRead(r.Context())
+			// Drain what the companion sends (its ceiling report after
+			// "ready") without closing: CloseRead would close the socket on
+			// that report and turn every exit below into a socket close.
+			// Cancellation still unblocks the fixture when no terminal frame
+			// is injected.
+			ctx, closed := context.WithCancel(r.Context())
+			go func() {
+				defer closed()
+				for {
+					if _, _, err := ws.Read(ctx); err != nil {
+						return
+					}
+				}
+			}()
 			select {
 			case raw := <-terminal:
 				if raw != nil {
@@ -88,7 +99,7 @@ func awaitShutdown(t *testing.T, ch <-chan struct{}, what string) {
 
 func TestRunOnceDrainsOnlyProcessWorkersOnEveryConnectionExit(t *testing.T) {
 	for _, op := range []string{"execute", "desktop"} {
-		for _, exit := range []string{"cancel", "local-pause", "pause", "revoke", "disconnect", "reject", "malformed", "invalid-request", "socket-close"} {
+		for _, exit := range []string{"cancel", "local-pause", "pause", "revoke", "disconnect", "disconnect-reconnect", "reject", "malformed", "invalid-request", "socket-close"} {
 			t.Run(op+"/"+exit, func(t *testing.T) {
 				executeStarted, filesystemStarted := make(chan struct{}), make(chan struct{})
 				cleanupStarted, releaseExecute, releaseFilesystem := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -135,6 +146,8 @@ func TestRunOnceDrainsOnlyProcessWorkersOnEveryConnectionExit(t *testing.T) {
 					terminal <- []byte(`{"message":{"type":"` + exit + `"}}`)
 				case "disconnect":
 					terminal <- []byte(`{"type":"disconnect"}`)
+				case "disconnect-reconnect":
+					terminal <- []byte(`{"type":"disconnect","reason":"remote","reconnect":true}`)
 				case "reject":
 					terminal <- []byte(`{"type":"reject_subscription"}`)
 				case "malformed":
@@ -155,6 +168,10 @@ func TestRunOnceDrainsOnlyProcessWorkersOnEveryConnectionExit(t *testing.T) {
 				case err := <-done:
 					if !errors.Is(err, ErrTransport) || errors.Is(err, ErrExecuteShutdown) {
 						t.Fatalf("unexpected drained connection result: %v", err)
+					}
+					// Only the house's own reconnect request comes back fast.
+					if errors.Is(err, ErrReconnect) != (exit == "disconnect-reconnect") {
+						t.Fatalf("reconnect request misread for %s: %v", exit, err)
 					}
 				case <-time.After(time.Second):
 					t.Fatal("execute cleanup waited for abandoned filesystem worker")
