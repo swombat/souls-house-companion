@@ -295,6 +295,14 @@ func (c *Client) runOnce(ctx context.Context, state *State, shutdownGrace time.D
 				return ErrTransport
 			}
 			epoch = request.Epoch
+			// Tell the house what this Mac's local ceiling allows, so its
+			// owner page can offer folder changes. The report names volume
+			// keys and access only, is tied to this connection's epoch, and
+			// authorises nothing: every request is still checked here.
+			if frame, err := ceilingReportFrame(identifier, epoch, connectionState.Ceiling); err != nil ||
+				conn.Write(ctx, websocket.MessageText, frame) != nil {
+				return ErrTransport
+			}
 			continue
 		}
 		if request.Type == "pause" || request.Type == "revoke" {
