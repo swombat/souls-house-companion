@@ -71,3 +71,29 @@ func TestDesktopRunsOnlyTheFetchedPayload(t *testing.T) {
 		t.Fatalf("fetched payload did not run: %s", data)
 	}
 }
+
+// The house refuses a JSON result over 64 KB, so a desktop result that large
+// would never arrive and the operation would time out. The handler sends a
+// result that fits and says why the output is missing.
+func TestDesktopResultAlwaysFitsTheHouseLimit(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0700)
+	binDir := filepath.Join(t.TempDir(), "ad")
+	os.Mkdir(binDir, 0755)
+	bin := filepath.Join(binDir, "agent-desktop")
+	os.WriteFile(bin, []byte("#!/bin/sh\nprintf '{\"x\":\"'; head -c 200000 /dev/zero | tr '\\000' a; printf '\"}'\n"), 0755)
+	h := &Handler{Desktop: &desktop.Supervisor{StateDir: dir, Binary: bin, Platform: "darwin"}}
+	desk := policy.Policy{Residents: []policy.Resident{{ID: "r", Desktop: true}}}
+	desktop.SaveScope(dir, desktop.Scope{Version: 1, Residents: []desktop.ResidentScope{{ID: "r", Apps: []string{"Finder"}}}})
+	desktop.TurnOn(dir, time.Now(), 15*time.Minute, false)
+	req := client.Request{Operation: "desktop", ResidentID: "r", Policy: desk, InputRequired: true,
+		Arguments: json.RawMessage(`{"command":"snapshot","app":"Finder","input_size":36}`),
+		Input:     []byte(`{"command":"snapshot","app":"Finder"}`)}
+	data, format, err := h.Handle(context.Background(), req, desk)
+	if err != nil || format != "json" || len(data) > desktop.MaxResultBytes {
+		t.Fatalf("%d bytes, format %q, err %v", len(data), format, err)
+	}
+	if !strings.Contains(string(data), `"result_too_large"`) || !strings.Contains(string(data), `"exit_code":0`) {
+		t.Fatalf("result: %.300s", data)
+	}
+}

@@ -94,7 +94,7 @@ func (h *Handler) handle(ctx context.Context, request client.Request, ceiling po
 				result = h.Desktop.Do(ctx, request.ResidentID, request.Policy, request.Input)
 			}
 		}
-		data, err := json.Marshal(result)
+		data, err := result.Encode()
 		return data, "json", err
 	}
 	var args arguments

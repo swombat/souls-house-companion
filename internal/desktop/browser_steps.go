@@ -36,6 +36,10 @@ import (
 const (
 	browserMaxElements = 1500
 	browserMaxName     = 300
+	// browserMaxElementBytes caps the encoded elements of one snapshot so the
+	// whole result stays under the house's inline result limit (MaxResultBytes)
+	// with room for the URL, title and envelope. A longer page is truncated.
+	browserMaxElementBytes = 48 << 10
 )
 
 // browserKeys are the keys press accepts for the resident browser, with
@@ -417,6 +421,7 @@ func snapshotTab(ctx context.Context, c *cdp, sess, frameID, url, prefix string,
 		}
 	}
 	elems := []element{}
+	elemBytes := 0
 	truncated := false
 	seen := make(map[string]bool, len(ax.Nodes))
 	var walk func(n *axNode, depth int, parentName string)
@@ -446,6 +451,12 @@ func snapshotTab(ctx context.Context, c *cdp, sess, frameID, url, prefix string,
 			if n.BackendDOMNodeID > 0 && n.BackendDOMNodeID <= 9999999 {
 				e.Ref = "@" + prefix + ":e" + strconv.Itoa(n.BackendDOMNodeID)
 			}
+			encoded, _ := json.Marshal(e)
+			if elemBytes+len(encoded)+1 > browserMaxElementBytes {
+				truncated = true
+				return
+			}
+			elemBytes += len(encoded) + 1
 			elems = append(elems, e)
 			childDepth, childParent = depth+1, name
 		} else if !n.Ignored && name != "" {
