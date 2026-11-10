@@ -170,6 +170,19 @@ func (s *Supervisor) Do(ctx context.Context, resident string, remote policy.Poli
 			result.Status, result.Reason = "stopped", ReasonUnavailable
 			return result
 		}
+		if step.Command == "press" {
+			// A headless press goes to the app's process, not to an element:
+			// agent-desktop delivers it to whatever the app reports as
+			// focused, which may be the owner's field in any window, even
+			// when the app has one window. Until a key can be aimed at a
+			// verified element, no key is sent; semantic verbs still run.
+			appendAudit(s.StateDir, AuditEntry{Time: s.now().UTC(), Resident: resident, App: step.App, Command: step.Command, Outcome: ReasonKeyboardUntargeted})
+			if len(result.Steps) == 0 {
+				return refused(ReasonKeyboardUntargeted)
+			}
+			result.Status, result.Reason = "stopped", ReasonKeyboardUntargeted
+			return result
+		}
 		sr, stop := s.run(ctx, resident, generation, step, root)
 		result.Steps = append(result.Steps, sr)
 		outcome := "exit_" + strconv.Itoa(sr.ExitCode)

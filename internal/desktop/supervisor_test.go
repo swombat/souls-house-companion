@@ -328,3 +328,36 @@ func TestARefCannotBeUsedUnderAnotherApp(t *testing.T) {
 		t.Fatalf("Notes lost its own store: %+v", r)
 	}
 }
+
+// A headless press lands on whatever element the app reports as focused,
+// which can be the owner's field even when the app has one window. No key is
+// sent, alone or in a batch, and the refusal is audited.
+func TestPressIsRefusedAndSendsNoKey(t *testing.T) {
+	f := newFixture(t)
+	f.on(time.Hour)
+	res := f.do(`{"command":"press","app":"Finder","combo":"return"}`)
+	if res.Status != "refused" || res.Reason != ReasonKeyboardUntargeted {
+		t.Fatalf("want refused %s, got %+v", ReasonKeyboardUntargeted, res)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(f.dir, RootsDir)); len(entries) != 0 {
+		if _, err := os.Stat(filepath.Join(f.root(), "state", "argv")); err == nil {
+			t.Fatal("agent-desktop must not run for a press")
+		}
+	}
+	if last := LastAction(f.dir); last == nil || last.Outcome != ReasonKeyboardUntargeted {
+		t.Fatalf("refusal must be audited, got %+v", last)
+	}
+}
+
+func TestPressMidBatchStopsAfterTheSemanticSteps(t *testing.T) {
+	f := newFixture(t)
+	f.on(time.Hour)
+	res := f.do(`{"command":"batch","steps":[` + snap + `,{"command":"press","app":"Finder","combo":"return"},` + snap + `]}`)
+	if res.Status != "stopped" || res.Reason != ReasonKeyboardUntargeted || len(res.Steps) != 1 {
+		t.Fatalf("want stopped after the snapshot, got %+v", res)
+	}
+	argv, _ := os.ReadFile(filepath.Join(f.root(), "state", "argv"))
+	if !strings.HasPrefix(string(argv), "snapshot\n") {
+		t.Fatalf("last call must be the snapshot, got %q", argv)
+	}
+}
