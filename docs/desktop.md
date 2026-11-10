@@ -23,6 +23,12 @@ A refusal names one reason: `not_granted_by_house`,
 `switch_expired`, `switch_unreadable`, `switch_changed_since_request`, `paused`, `invalid_request`,
 `agent_desktop_unavailable`, `platform_not_supported`, `timeout`.
 
+A result is at most 64 KB of JSON, the house's inline limit (a larger one is
+refused by the house, and the operation would only time out). If the outputs
+would make it larger, they are dropped: each step keeps its exit code and is
+marked `output_truncated`, and the reason is `result_too_large` unless the
+result already had one.
+
 The scope and switch are separate files, not fields in `state.json`, so a
 rollback to a binary without desktop control still loads its state. A local
 ceiling that sets `desktop` is refused (`policy apply`/`enroll`).
@@ -87,8 +93,9 @@ never through agent-desktop or the window server:
 - `snapshot` (`interactive` optional): the tab's URL, title and main-frame
   accessibility tree in document order, as `{ref, role, name, value, depth}`
   entries. Ignored and unnamed structural nodes are dropped, as are text
-  nodes repeating their parent. At most 1500 elements (`truncated: true`
-  beyond), names cut at 300 bytes. `interactive: true` keeps links, buttons,
+  nodes repeating their parent. At most 1500 elements, or 48 KB of
+  encoded elements if that comes first (`truncated: true` beyond), names cut
+  at 300 bytes. `interactive: true` keeps links, buttons,
   fields and other controls only.
 - `click` `ref`: scrolls the element into view and calls its `click()`.
 - `type` `ref` `text`: focuses the element (refused as `not_focusable` if focus

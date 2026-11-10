@@ -69,6 +69,31 @@ type Result struct {
 	Steps  []StepResult `json:"steps,omitempty"`
 }
 
+// MaxResultBytes is the house's inline limit for a JSON result. A larger
+// result is refused by the house and the operation would only time out.
+const MaxResultBytes = 64 << 10
+
+// Encode marshals the result so that it fits in one house result. If the
+// outputs make it too large, they are dropped (each step marked
+// output_truncated) and the reason says so; status and exit codes are kept,
+// because the steps did run.
+func (r Result) Encode() ([]byte, error) {
+	data, err := json.Marshal(r)
+	if err != nil || len(data) <= MaxResultBytes {
+		return data, err
+	}
+	slim := Result{Status: r.Status, Reason: r.Reason, Steps: make([]StepResult, len(r.Steps))}
+	if slim.Reason == "" {
+		slim.Reason = ReasonResultTooLarge
+	}
+	for i, step := range r.Steps {
+		step.Output = nil
+		step.Truncated = true
+		slim.Steps[i] = step
+	}
+	return json.Marshal(slim)
+}
+
 func (s *Supervisor) now() time.Time {
 	if s.Now != nil {
 		return s.Now()

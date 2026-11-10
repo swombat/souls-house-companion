@@ -55,6 +55,9 @@ const (
 	ReasonTimeout        = "timeout"
 	// A key press cannot yet be aimed at a verified element, so none is sent.
 	ReasonKeyboardUntargeted = "keyboard_target_unverified"
+	// The steps ran but their outputs would not fit in one house result; the
+	// outputs are dropped, the exit codes kept.
+	ReasonResultTooLarge = "result_too_large"
 )
 
 var appName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$`)

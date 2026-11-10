@@ -32,6 +32,7 @@ type fakeChrome struct {
 	actions  []string
 	hooks    map[string]func() // run while answering a method
 	detached map[string]bool   // object ids whose node is no longer connected
+	ax       []map[string]any  // accessibility tree, if not fakeAXTree
 }
 
 func newFakeChrome(t *testing.T, pages ...string) *fakeChrome {
@@ -94,7 +95,11 @@ func newFakeChrome(t *testing.T, pages ...string) *fakeChrome {
 			case "Runtime.evaluate":
 				result["result"] = map[string]any{"type": "string", "value": "Example page"}
 			case "Accessibility.getFullAXTree":
-				result["nodes"] = fakeAXTree
+				if fc.ax != nil {
+					result["nodes"] = fc.ax
+				} else {
+					result["nodes"] = fakeAXTree
+				}
 			case "DOM.resolveNode":
 				id := m.Params["backendNodeId"].(float64)
 				if id >= 100 {
