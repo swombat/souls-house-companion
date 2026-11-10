@@ -361,7 +361,10 @@ func TestOffOnFasterThanThePollStillStopsTheRunningStep(t *testing.T) {
 	f.on(15 * time.Minute) // within one poll interval
 	select {
 	case r := <-done:
-		if r.Status != "stopped" || r.Reason != ReasonStoppedMidCall+":"+ReasonSwitchChanged || len(r.Steps) != 1 {
+		// The poll may land between the off and the on (switch_off) or after
+		// both (switch_changed). Either way the running step must stop.
+		okReason := r.Reason == ReasonStoppedMidCall+":"+ReasonSwitchChanged || r.Reason == ReasonStoppedMidCall+":"+ReasonSwitchOff
+		if r.Status != "stopped" || !okReason || len(r.Steps) != 1 {
 			t.Fatalf("%+v", r)
 		}
 	case <-time.After(5 * time.Second):
