@@ -96,15 +96,22 @@ never through agent-desktop or the window server:
   is not echoed or audited.
 - `press` `combo`: one of `return`/`enter`, `tab`, `escape`, `backspace`,
   `space`, the arrows, `pageup`, `pagedown`, `home`, `end`, with no modifiers,
-  dispatched to that tab only. Unlike `press` on other apps, which stays
-  refused, no key can reach another app or the browser's own menus.
+  dispatched to that tab's renderer only, so it cannot land in the owner's
+  focused app, unlike `press` on other apps, which stays refused. It is not
+  bound to a ref: it acts on whatever has focus in the shared resident tab.
+  Once keyDown is sent, keyUp always follows, so no key is left held.
 
-A ref is `@b<12 hex>:e<backend node id>`. The prefix is a hash of the
-resident, the on-period and the page load (`loaderId`) it was read from, and
-an act re-derives it: a ref from an earlier page, another on-period or another
-resident is refused as `stale_ref` before anything is resolved. Authority is
-checked again immediately before the one call that clicks, inserts or sends a
-key. `find`, `get`, `is` and `scroll` are not offered for the resident browser.
+A ref is `@b<12 hex>:e<backend node id>`. The prefix is a hash of a random
+epoch drawn at each companion start, the resident, the on-period, the tab, the
+frame and the document load (`loaderId`) it was read from, and every act
+re-derives it: a ref from before a restart, from an earlier document, another
+on-period or another resident is refused as `stale_ref` before anything is
+resolved. Same-document navigation (pushState) keeps the document load, so a
+ref to a node that is still connected stays valid and one to a node the page
+removed is refused as `stale_ref`; a ref names a node, not a route or what the
+page means now. Authority is checked again immediately before each call that
+acts: the click, the focus and again the insertion for `type`, the key.
+`find`, `get`, `is` and `scroll` are not offered for the resident browser.
 
 Measured on the owner's Mac (10 Nov, real Chrome, WezTerm in front, sampled
 every 100 ms): open, read, type into a search box, press Enter, click a link,

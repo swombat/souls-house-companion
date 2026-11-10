@@ -3,6 +3,7 @@ package desktop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/swombat/souls-house-companion/internal/policy"
 )
 
 // fakeChrome speaks just enough DevTools protocol for browse, and records
@@ -26,13 +28,14 @@ type fakeChrome struct {
 	launches  int
 	sessions  int
 	// Page state for the read and act verbs.
-	loader    string
-	actions   []string
-	onResolve func()
+	loader   string
+	actions  []string
+	hooks    map[string]func() // run while answering a method
+	detached map[string]bool   // object ids whose node is no longer connected
 }
 
 func newFakeChrome(t *testing.T, pages ...string) *fakeChrome {
-	fc := &fakeChrome{pages: pages, loader: "L1"}
+	fc := &fakeChrome{pages: pages, loader: "L1", hooks: map[string]func(){}, detached: map[string]bool{}}
 	fc.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/devtools/browser/") {
 			http.NotFound(w, r)
@@ -60,6 +63,11 @@ func newFakeChrome(t *testing.T, pages ...string) *fakeChrome {
 			_ = c.Write(ctx, websocket.MessageText, []byte(`{"method":"Target.targetInfoChanged","params":{}}`))
 			result := map[string]any{}
 			fc.mu.Lock()
+			if hook := fc.hooks[m.Method]; hook != nil {
+				fc.mu.Unlock()
+				hook()
+				fc.mu.Lock()
+			}
 			switch m.Method {
 			case "Target.getTargets":
 				infos := []map[string]any{{"targetId": "svc", "type": "service_worker"}}
@@ -88,13 +96,7 @@ func newFakeChrome(t *testing.T, pages ...string) *fakeChrome {
 			case "Accessibility.getFullAXTree":
 				result["nodes"] = fakeAXTree
 			case "DOM.resolveNode":
-				hook := fc.onResolve
 				id := m.Params["backendNodeId"].(float64)
-				if hook != nil {
-					fc.mu.Unlock()
-					hook()
-					fc.mu.Lock()
-				}
 				if id >= 100 {
 					fc.mu.Unlock()
 					_ = c.Write(ctx, websocket.MessageText, []byte(`{"id":`+itoa(m.ID)+`,"error":{"message":"No node with given id found"}}`))
@@ -102,8 +104,13 @@ func newFakeChrome(t *testing.T, pages ...string) *fakeChrome {
 				}
 				result["object"] = map[string]any{"objectId": "obj-" + itoa(int(id))}
 			case "Runtime.callFunctionOn":
-				fc.actions = append(fc.actions, "call "+m.Params["objectId"].(string))
-				result["result"] = map[string]any{"type": "boolean", "value": true}
+				obj := m.Params["objectId"].(string)
+				if fc.detached[obj] {
+					result["result"] = map[string]any{"type": "string", "value": "detached"}
+					break
+				}
+				fc.actions = append(fc.actions, "call "+obj)
+				result["result"] = map[string]any{"type": "string", "value": "ok"}
 			case "Input.insertText":
 				fc.actions = append(fc.actions, "insert "+m.Params["text"].(string))
 			case "Input.dispatchKeyEvent":
@@ -501,7 +508,7 @@ func TestResidentBrowserStopsActingWhenRevoked(t *testing.T) {
 			f := browserFixture(t, fc)
 			box := refFor(t, snapshot(t, f, true), "Search")
 			fc.mu.Lock()
-			fc.onResolve = func() {
+			fc.hooks["DOM.resolveNode"] = func() {
 				if err := TurnOff(f.dir); err != nil {
 					t.Error(err)
 				}
@@ -519,5 +526,115 @@ func TestResidentBrowserStopsActingWhenRevoked(t *testing.T) {
 				t.Fatalf("acted after revocation: %v", fc.actions)
 			}
 		})
+	}
+}
+
+func offThenOn(t *testing.T, f *fixture) {
+	if err := TurnOff(f.dir); err != nil {
+		t.Error(err)
+	}
+	f.clock.Add(int64(time.Second))
+	if _, err := TurnOn(f.dir, f.sup.Now(), 15*time.Minute, false); err != nil {
+		t.Error(err)
+	}
+}
+
+// Focusing is its own round trip and runs page handlers: revocation during
+// it stops the step before the text is inserted.
+func TestResidentBrowserTypeRechecksBeforeInserting(t *testing.T) {
+	for name, revoke := range map[string]func(t *testing.T, f *fixture){
+		"switched off":  func(t *testing.T, f *fixture) { _ = TurnOff(f.dir) },
+		"new on-period": offThenOn,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fc := newFakeChrome(t, "tab1")
+			f := browserFixture(t, fc)
+			box := refFor(t, snapshot(t, f, true), "Search")
+			fc.mu.Lock()
+			fc.hooks["Runtime.callFunctionOn"] = func() { revoke(t, f) }
+			fc.mu.Unlock()
+			r := f.do(`{"command":"type","app":"souls.house browser","ref":"` + box + `","text":"after revocation"}`)
+			if r.Status != "stopped" || !strings.HasPrefix(r.Reason, ReasonStoppedMidCall+":") {
+				t.Fatalf("%+v", r)
+			}
+			for _, a := range fc.actions {
+				if strings.HasPrefix(a, "insert") {
+					t.Fatalf("inserted after revocation: %v", fc.actions)
+				}
+			}
+		})
+	}
+}
+
+func TestResidentBrowserPressStopsWhenRevoked(t *testing.T) {
+	fc := newFakeChrome(t, "tab1")
+	f := browserFixture(t, fc)
+	fc.mu.Lock()
+	fc.hooks["Page.getFrameTree"] = func() { _ = TurnOff(f.dir) }
+	fc.mu.Unlock()
+	r := f.do(`{"command":"press","app":"souls.house browser","combo":"return"}`)
+	if r.Status != "stopped" || len(fc.actions) != 0 {
+		t.Fatalf("%+v actions=%v", r, fc.actions)
+	}
+}
+
+// A companion restart keeps the on-period (#24) and Chrome keeps the page,
+// but refs issued before the restart are stale; a fresh read gives good ones.
+func TestResidentBrowserRefsDoNotSurviveARestart(t *testing.T) {
+	fc := newFakeChrome(t, "tab1")
+	f := browserFixture(t, fc)
+	old := refFor(t, snapshot(t, f, true), "Fairy ring")
+	if err := errors.Join(ReconcileAtStartup(f.dir, f.sup.Now()), WipeRoots(f.dir)); err != nil {
+		t.Fatal(err)
+	}
+	prev := f.sup
+	f.sup = &Supervisor{StateDir: prev.StateDir, Binary: prev.Binary, Opener: prev.Opener, Platform: prev.Platform, Now: prev.Now, BrowserLaunch: prev.BrowserLaunch}
+	r := f.do(`{"command":"click","app":"souls.house browser","ref":"` + old + `"}`)
+	if r.Status != "completed" || r.Steps[0].ExitCode == 0 || !strings.Contains(string(r.Steps[0].Output), "stale_ref") || len(fc.actions) != 0 {
+		t.Fatalf("pre-restart ref: %+v %s actions=%v", r, r.Steps[0].Output, fc.actions)
+	}
+	fresh := refFor(t, snapshot(t, f, true), "Fairy ring")
+	if fresh == old {
+		t.Fatal("same ref after restart")
+	}
+	if r := f.do(`{"command":"click","app":"souls.house browser","ref":"` + fresh + `"}`); r.Steps[0].ExitCode != 0 || len(fc.actions) != 1 {
+		t.Fatalf("fresh ref: %+v actions=%v", r, fc.actions)
+	}
+}
+
+// Resident B cannot use a ref resident A read, in the same shared tab.
+func TestResidentBrowserRefsAreNotSharedBetweenResidents(t *testing.T) {
+	fc := newFakeChrome(t, "tab1")
+	f := browserFixture(t, fc)
+	if err := SaveScope(f.dir, Scope{Version: 1, Residents: []ResidentScope{{ID: "mira", Apps: []string{ResidentBrowser}}, {ID: "lume", Apps: []string{ResidentBrowser}}}}); err != nil {
+		t.Fatal(err)
+	}
+	f.remote.Residents = append(f.remote.Residents, policy.Resident{ID: "lume", Desktop: true})
+	link := refFor(t, snapshot(t, f, true), "Fairy ring")
+	r := f.sup.Do(context.Background(), "lume", f.remote, json.RawMessage(`{"command":"click","app":"souls.house browser","ref":"`+link+`"}`))
+	if r.Status != "completed" || r.Steps[0].ExitCode == 0 || !strings.Contains(string(r.Steps[0].Output), "stale_ref") || len(fc.actions) != 0 {
+		t.Fatalf("%+v %s actions=%v", r, r.Steps[0].Output, fc.actions)
+	}
+}
+
+// Same-document navigation keeps the document load: a ref to a node still
+// connected works, a ref to a node the page removed is stale.
+func TestResidentBrowserSameDocumentNavigation(t *testing.T) {
+	fc := newFakeChrome(t, "tab1")
+	f := browserFixture(t, fc)
+	out := snapshot(t, f, true)
+	link, box := refFor(t, out, "Fairy ring"), refFor(t, out, "Search")
+	fc.mu.Lock()
+	fc.detached["obj-13"] = true // pushState re-rendered the link away
+	fc.mu.Unlock()
+	r := f.do(`{"command":"click","app":"souls.house browser","ref":"` + link + `"}`)
+	if r.Steps[0].ExitCode == 0 || !strings.Contains(string(r.Steps[0].Output), "stale_ref") {
+		t.Fatalf("detached: %+v %s", r, r.Steps[0].Output)
+	}
+	if r := f.do(`{"command":"click","app":"souls.house browser","ref":"` + box + `"}`); r.Steps[0].ExitCode != 0 {
+		t.Fatalf("retained: %+v", r)
+	}
+	if strings.Join(fc.actions, "|") != "call obj-15" {
+		t.Fatalf("actions %v", fc.actions)
 	}
 }

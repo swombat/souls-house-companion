@@ -48,6 +48,10 @@ type Supervisor struct {
 	Platform string
 
 	mu sync.Mutex
+	// refEpoch is random per Supervisor, i.e. per companion start, so a
+	// resident-browser ref never outlives the process that issued it.
+	refEpochOnce sync.Once
+	refEpoch     string
 }
 
 type StepResult struct {

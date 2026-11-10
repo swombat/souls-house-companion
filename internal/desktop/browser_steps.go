@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -24,9 +25,13 @@ import (
 //   - press: one key (browserKeys) to whatever has focus inside the tab.
 //
 // A ref is "@b<12 hex>:e<backend node id>". The prefix binds it to the
-// resident, the on-period and the page load it was read from, so a ref from
-// an earlier page, period or resident is refused as stale rather than resolved
-// against whatever the node id names now.
+// companion process that issued it (a random epoch per start), the resident,
+// the on-period, the tab and the document load it was read from, so a ref
+// from before a restart, from an earlier document, period or resident is
+// refused as stale rather than resolved against whatever the node id names
+// now. A same-document navigation (pushState) keeps the document load: a ref
+// to a node that is still connected stays valid, and one whose node has been
+// removed is refused as stale. A ref says which node, not which route.
 
 const (
 	browserMaxElements = 1500
@@ -63,9 +68,20 @@ var interactiveRoles = set("link", "button", "textbox", "searchbox", "combobox",
 // skippedRoles never appear in a snapshot: they repeat their parent's text.
 var skippedRoles = set("InlineTextBox", "LineBreak", "none", "presentation")
 
-func refPrefix(resident, generation, loaderID string) string {
-	sum := sha256.Sum256([]byte(resident + "\x00" + generation + "\x00" + loaderID))
+func refPrefix(epoch, resident, generation, target, frame, loaderID string) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{epoch, resident, generation, target, frame, loaderID}, "\x00")))
 	return "b" + hex.EncodeToString(sum[:6])
+}
+
+func (s *Supervisor) epoch() string {
+	s.refEpochOnce.Do(func() {
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			panic(err) // crypto/rand does not fail on supported platforms
+		}
+		s.refEpoch = hex.EncodeToString(b)
+	})
+	return s.refEpoch
 }
 
 // splitRef returns the prefix and backend node id of a resident-browser ref.
@@ -232,7 +248,7 @@ func (s *Supervisor) browse(parent context.Context, resident, generation string,
 		return fail(ReasonBrowserUnavailable)
 	}
 	frame := tree.FrameTree.Frame
-	prefix := refPrefix(resident, generation, frame.LoaderID)
+	prefix := refPrefix(s.epoch(), resident, generation, page, frame.ID, frame.LoaderID)
 
 	var out any
 	switch step.Command {
@@ -248,10 +264,15 @@ func (s *Supervisor) browse(parent context.Context, resident, generation string,
 			return stopped(r)
 		}
 		if step.Command == "click" {
-			err = callOn(ctx, c, sess, objectID, `function(){this.scrollIntoView({block:"center",inline:"center"});this.click();return true}`)
+			err = callOn(ctx, c, sess, objectID, `function(){if(!this.isConnected)return "detached";this.scrollIntoView({block:"center",inline:"center"});this.click();return "ok"}`)
 		} else {
-			err = callOn(ctx, c, sess, objectID, `function(){this.scrollIntoView({block:"center"});this.focus();var a=document.activeElement;return a===this||this.contains(a)}`)
+			err = callOn(ctx, c, sess, objectID, `function(){if(!this.isConnected)return "detached";this.scrollIntoView({block:"center"});this.focus();var a=document.activeElement;return a===this||this.contains(a)?"ok":"unfocusable"}`)
 			if err == nil {
+				// Focusing runs page handlers and is its own round trip:
+				// check again before the call that inserts.
+				if r := revoked(); r != "" {
+					return stopped(r)
+				}
 				err = c.call(ctx, sess, "Input.insertText", map[string]any{"text": string(step.stdin)}, nil)
 			}
 		}
@@ -265,6 +286,9 @@ func (s *Supervisor) browse(parent context.Context, resident, generation string,
 		if k.text != "" {
 			down["type"], down["text"] = "keyDown", k.text
 		}
+		// The key goes to whatever has focus in this tab, not to a ref. Once
+		// keyDown is sent, keyUp always follows (cleanup, never a new action),
+		// so no key is left held even if authority ends in between.
 		if err = c.call(ctx, sess, "Input.dispatchKeyEvent", down, nil); err == nil {
 			err = c.call(ctx, sess, "Input.dispatchKeyEvent", map[string]any{"type": "keyUp", "key": k.key, "code": k.code, "windowsVirtualKeyCode": k.vk, "nativeVirtualKeyCode": k.vk}, nil)
 		}
@@ -320,10 +344,15 @@ func callOn(ctx context.Context, c *cdp, sess, objectID, fn string) error {
 	if len(r.ExceptionDetails) > 0 {
 		return errors.New("exception")
 	}
-	if r.Result.Value != true {
+	switch r.Result.Value {
+	case "ok":
+		return nil
+	case "detached":
+		return errStaleRef
+	case "unfocusable":
 		return errNotFocusable
 	}
-	return nil
+	return errors.New("unexpected result")
 }
 
 type axValue struct {
