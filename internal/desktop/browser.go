@@ -200,11 +200,54 @@ func (c *cdp) call(ctx context.Context, session, method string, params any, out 
 // browse loads url in the resident browser. It reuses the first open tab
 // (Page.navigate does not activate it); with no tab it creates a background
 // one. The URL is not echoed in the result or the audit.
-func (s *Supervisor) browse(ctx context.Context, step Step) StepResult {
+//
+// Authority is watched for the whole step, as run does for a process: a
+// switch-off, expiry, pause, scope edit or new on-period while the browser is
+// starting cancels the step, and it is checked once more immediately before
+// the only call that loads anything, so nothing navigates after revocation.
+func (s *Supervisor) browse(parent context.Context, resident, generation string, step Step) (StepResult, string) {
 	sr := StepResult{Command: step.Command, App: step.App, ExitCode: 1}
-	fail := func(reason string) StepResult {
+	ctx, cancel := context.WithTimeoutCause(parent, browserStartTimeout+stepSlack, errStepTimeout)
+	defer cancel()
+	stopReason := make(chan string, 1)
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		t := time.NewTicker(pollInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if _, reason := s.localAuthority(resident, []Step{step}, generation); reason != "" {
+					stopReason <- reason
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	defer func() { cancel(); <-watchDone }()
+	revoked := func() string {
+		select {
+		case r := <-stopReason:
+			stopReason <- r
+			return r
+		default:
+		}
+		_, r := s.localAuthority(resident, []Step{step}, generation)
+		return r
+	}
+	fail := func(reason string) (StepResult, string) {
+		if r := revoked(); r != "" {
+			return sr, ReasonStoppedMidCall + ":" + r
+		}
+		if errors.Is(context.Cause(ctx), errStepTimeout) || parent.Err() != nil {
+			return sr, ReasonTimeout
+		}
 		sr.Output, _ = json.Marshal(map[string]string{"error": reason})
-		return sr
+		return sr, ""
 	}
 	conn, err := s.connectBrowser(ctx)
 	if err != nil {
@@ -230,6 +273,10 @@ func (s *Supervisor) browse(ctx context.Context, step Step) StepResult {
 	}
 	how := "navigated"
 	if page == "" {
+		// Last authority check before the only call that loads anything.
+		if r := revoked(); r != "" {
+			return sr, ReasonStoppedMidCall + ":" + r
+		}
 		var created struct {
 			TargetID string `json:"targetId"`
 		}
@@ -244,6 +291,11 @@ func (s *Supervisor) browse(ctx context.Context, step Step) StepResult {
 		if err := c.call(ctx, "", "Target.attachToTarget", map[string]any{"targetId": page, "flatten": true}, &attached); err != nil || attached.SessionID == "" {
 			return fail(ReasonBrowserUnavailable)
 		}
+		// Last authority check before the only call that loads anything.
+		if r := revoked(); r != "" {
+			_ = c.call(ctx, "", "Target.detachFromTarget", map[string]any{"sessionId": attached.SessionID}, nil)
+			return sr, ReasonStoppedMidCall + ":" + r
+		}
 		var nav struct {
 			ErrorText string `json:"errorText"`
 		}
@@ -255,5 +307,5 @@ func (s *Supervisor) browse(ctx context.Context, step Step) StepResult {
 	}
 	sr.ExitCode = 0
 	sr.Output, _ = json.Marshal(map[string]any{"ok": true, how: true})
-	return sr
+	return sr, ""
 }

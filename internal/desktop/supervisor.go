@@ -191,7 +191,7 @@ func (s *Supervisor) Do(ctx context.Context, resident string, remote policy.Poli
 		var sr StepResult
 		var stop string
 		if step.browser {
-			sr = s.browse(ctx, step)
+			sr, stop = s.browse(ctx, resident, generation, step)
 		} else {
 			sr, stop = s.run(ctx, resident, generation, step, root)
 		}

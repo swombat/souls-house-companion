@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -60,17 +61,47 @@ func TestRealResidentBrowserKeepsFocus(t *testing.T) {
 		}
 	})
 	before := frontApp(t)
+	if before == "Google Chrome" {
+		// A Chrome baseline cannot show Chrome taking focus (the false
+		// positive this test exists to prevent). Put another app in front.
+		t.Fatalf("front app is Google Chrome; bring another app forward first")
+	}
+	// Sample throughout each call, not only after it.
+	var mu sync.Mutex
+	var seen []string
+	stop := make(chan struct{})
+	sampled := make(chan struct{})
+	go func() {
+		defer close(sampled)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(100 * time.Millisecond):
+				a := frontApp(t)
+				mu.Lock()
+				seen = append(seen, a)
+				mu.Unlock()
+			}
+		}
+	}()
 	for i, u := range []string{"https://en.wikipedia.org/wiki/Physarum_polycephalum", "https://en.wikipedia.org/wiki/Lichen"} {
 		r := f.sup.Do(context.Background(), "mira", f.remote, []byte(`{"command":"open","app":"souls.house browser","url":"`+u+`"}`))
 		if r.Status != "completed" || r.Steps[0].ExitCode != 0 {
-			t.Fatalf("open %d: %+v %s", i, r, r.Steps[0].Output)
+			t.Fatalf("open %d: %+v", i, r)
 		}
-		for j := 0; j < 6; j++ {
-			time.Sleep(500 * time.Millisecond)
-			if now := frontApp(t); now != before {
-				t.Fatalf("open %d: front app changed from %s to %s", i, before, now)
-			}
-		}
-		t.Logf("open %d: %s, front still %s", i, r.Steps[0].Output, before)
+		time.Sleep(3 * time.Second)
+		t.Logf("open %d: %s", i, r.Steps[0].Output)
 	}
+	close(stop)
+	<-sampled
+	if len(seen) < 40 {
+		t.Fatalf("only %d samples", len(seen))
+	}
+	for i, a := range seen {
+		if a != before {
+			t.Fatalf("sample %d of %d: front app %s, was %s", i, len(seen), a, before)
+		}
+	}
+	t.Logf("%d samples, front app %s throughout", len(seen), before)
 }

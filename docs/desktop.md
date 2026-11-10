@@ -79,11 +79,24 @@ over the DevTools protocol: `Page.navigate` in the first existing tab, or
 brought forward and no key is sent. The scope must list `souls.house browser`
 itself; listing Google Chrome does not imply it, and no other verb accepts it.
 
-Exposure: the DevTools port listens on 127.0.0.1 only, but any local process
-of the owner's user can drive that browser while it runs (as it could already
-read the profile). The profile holds only what residents did in it, never the
+Authority is watched for the whole step, as for agent-desktop calls: a
+switch-off, expiry, pause, scope edit or new on-period while the browser is
+starting stops the step, and authority is checked again immediately before
+the one call that loads a page, so nothing navigates after revocation.
+
+It is one shared resident profile, not one per resident: every resident with
+`souls.house browser` in scope uses the same browser, cookies and history,
+and `open` replaces the page in its first tab rather than adding a tab per
+call or per resident.
+
+Exposure: the DevTools port listens on 127.0.0.1, and the private profile
+does not protect the listener. Any local process can connect to it while the
+browser runs, including processes of other users on the Mac, not only the
+owner's; whoever connects can drive the resident browser and read what it
+has loaded. The profile holds only what residents did in it, never the
 owner's sessions. The browser outlives the call; the owner closes it like any
-window, and the next `open` starts it again.
+window, and the next `open` starts it again. A pipe transport would close
+this, but needs the binary launched directly, which takes focus (measured).
 
 ## Process lifetime
 

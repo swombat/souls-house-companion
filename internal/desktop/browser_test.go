@@ -246,3 +246,47 @@ func TestResidentBrowserOnlyTakesOpen(t *testing.T) {
 		t.Fatalf("%+v", r.Steps[0])
 	}
 }
+
+// Revocation while the browser is starting must stop the step before
+// anything is loaded: switch-off, and switch-off-then-on (a new on-period).
+func TestResidentBrowserStopsWhenControlIsRevokedDuringStart(t *testing.T) {
+	cases := map[string]func(f *fixture) error{
+		"switched off": func(f *fixture) error { return TurnOff(f.dir) },
+		"new on-period": func(f *fixture) error {
+			if err := TurnOff(f.dir); err != nil {
+				return err
+			}
+			f.clock.Add(int64(time.Second))
+			_, err := TurnOn(f.dir, f.sup.Now(), 15*time.Minute, false)
+			return err
+		},
+		"scope edited": func(f *fixture) error {
+			return SaveScope(f.dir, Scope{Version: 1, Residents: []ResidentScope{{ID: "mira", Apps: []string{"Finder"}}}})
+		},
+	}
+	for name, revoke := range cases {
+		for _, pages := range [][]string{{"tab1"}, nil} {
+			t.Run(name, func(t *testing.T) {
+				fc := newFakeChrome(t, pages...)
+				f := browserFixture(t, fc)
+				f.sup.BrowserLaunch = func(ctx context.Context, profile string) error {
+					if err := revoke(f); err != nil {
+						t.Fatal(err)
+					}
+					return fc.launch(ctx, profile)
+				}
+				r := f.do(browseURL)
+				if r.Status != "stopped" || !strings.HasPrefix(r.Reason, ReasonStoppedMidCall+":") {
+					t.Fatalf("%+v", r)
+				}
+				if len(fc.navigated) != 0 || len(fc.created) != 0 {
+					t.Fatalf("loaded after revocation: navigated=%v created=%v", fc.navigated, fc.created)
+				}
+				audit, _ := os.ReadFile(filepath.Join(f.dir, AuditFile))
+				if !strings.Contains(string(audit), ReasonStoppedMidCall) {
+					t.Fatalf("audit: %s", audit)
+				}
+			})
+		}
+	}
+}
