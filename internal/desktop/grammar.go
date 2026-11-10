@@ -66,9 +66,12 @@ type Step struct {
 	// opener: argv is for /usr/bin/open, not agent-desktop.
 	opener bool
 	// browser: the step drives the companion's own resident browser over
-	// the DevTools protocol; url is its only argument.
-	browser bool
-	url     string
+	// the DevTools protocol, with these typed arguments (text in stdin).
+	browser     bool
+	url         string
+	ref         string
+	combo       string
+	interactive bool
 }
 
 // Argv returns the arguments after the binary path.
@@ -142,10 +145,10 @@ func parseStep(f map[string]json.RawMessage) (Step, error) {
 		return s, errInvalid
 	}
 	s.App = app
-	if app == ResidentBrowser && s.Command != "open" {
-		// The resident browser is reached only through open; agent-desktop
-		// would resolve this name to nothing or to the owner's Chrome.
-		return s, errInvalid
+	if app == ResidentBrowser {
+		// Never agent-desktop, which would resolve this name to nothing or to
+		// the owner's Chrome: every verb goes over DevTools (browser_steps.go).
+		return parseBrowserStep(s, f)
 	}
 	a := []string{s.Command}
 	flag := func(name, value string) { a = append(a, "--"+name+"="+value) }
@@ -343,12 +346,6 @@ func parseStep(f map[string]json.RawMessage) (Step, error) {
 		if json.Unmarshal(f["url"], &u) != nil || !validURL(u) {
 			return s, errInvalid
 		}
-		if app == ResidentBrowser {
-			// No process and no keystroke: the companion asks its own
-			// browser to load the URL in the background (see browser.go).
-			s.browser, s.url = true, u
-			return s, nil
-		}
 		// -g: Launch Services hands the URL to the app without bringing it
 		// to the front, and no keystroke is involved, so nothing can land in
 		// a field the owner has focused. The app opens it its own way (for a
@@ -421,4 +418,64 @@ func validURL(v string) bool {
 		return false
 	}
 	return u.Hostname() != ""
+}
+
+// browserKeysAllowed lists the fields each resident-browser verb accepts.
+var browserKeysAllowed = map[string]map[string]bool{
+	"open":     set("command", "app", "url"),
+	"snapshot": set("command", "app", "interactive"),
+	"click":    set("command", "app", "ref"),
+	"type":     set("command", "app", "ref", "text"),
+	"press":    set("command", "app", "combo"),
+}
+
+func parseBrowserStep(s Step, f map[string]json.RawMessage) (Step, error) {
+	keys, ok := browserKeysAllowed[s.Command]
+	if !ok {
+		return s, errInvalid
+	}
+	for k := range f {
+		if !keys[k] {
+			return s, errInvalid
+		}
+	}
+	s.browser = true
+	switch s.Command {
+	case "open":
+		if json.Unmarshal(f["url"], &s.url) != nil || !validURL(s.url) {
+			return s, errInvalid
+		}
+	case "snapshot":
+		v, _, err := boolean(f, "interactive")
+		if err != nil {
+			return s, err
+		}
+		s.interactive = v
+	case "click", "type":
+		r, err := str(f, "ref", true)
+		if err != nil {
+			return s, err
+		}
+		if _, _, ok := splitRef(r); !ok || r[1] != 'b' {
+			return s, errInvalid
+		}
+		s.ref = r
+		if s.Command == "type" {
+			var text string
+			if json.Unmarshal(f["text"], &text) != nil || text == "" || len(text) > MaxTextBytes || !utf8.ValidString(text) || strings.ContainsRune(text, 0) {
+				return s, errInvalid
+			}
+			s.stdin = []byte(text)
+		}
+	case "press":
+		c, err := str(f, "combo", true)
+		if err != nil {
+			return s, err
+		}
+		if _, ok := browserKeys[c]; !ok {
+			return s, errInvalid
+		}
+		s.combo = c
+	}
+	return s, nil
 }

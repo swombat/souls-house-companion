@@ -111,7 +111,8 @@ func dialBrowser(ctx context.Context, profile string) (*websocket.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn.SetReadLimit(4 << 20)
+	// An accessibility tree of a long page runs to megabytes.
+	conn.SetReadLimit(32 << 20)
 	return conn, nil
 }
 
@@ -195,117 +196,4 @@ func (c *cdp) call(ctx context.Context, session, method string, params any, out 
 		}
 		return nil
 	}
-}
-
-// browse loads url in the resident browser. It reuses the first open tab
-// (Page.navigate does not activate it); with no tab it creates a background
-// one. The URL is not echoed in the result or the audit.
-//
-// Authority is watched for the whole step, as run does for a process: a
-// switch-off, expiry, pause, scope edit or new on-period while the browser is
-// starting cancels the step, and it is checked once more immediately before
-// the only call that loads anything, so nothing navigates after revocation.
-func (s *Supervisor) browse(parent context.Context, resident, generation string, step Step) (StepResult, string) {
-	sr := StepResult{Command: step.Command, App: step.App, ExitCode: 1}
-	ctx, cancel := context.WithTimeoutCause(parent, browserStartTimeout+stepSlack, errStepTimeout)
-	defer cancel()
-	stopReason := make(chan string, 1)
-	watchDone := make(chan struct{})
-	go func() {
-		defer close(watchDone)
-		t := time.NewTicker(pollInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				if _, reason := s.localAuthority(resident, []Step{step}, generation); reason != "" {
-					stopReason <- reason
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-	defer func() { cancel(); <-watchDone }()
-	revoked := func() string {
-		select {
-		case r := <-stopReason:
-			stopReason <- r
-			return r
-		default:
-		}
-		_, r := s.localAuthority(resident, []Step{step}, generation)
-		return r
-	}
-	fail := func(reason string) (StepResult, string) {
-		if r := revoked(); r != "" {
-			return sr, ReasonStoppedMidCall + ":" + r
-		}
-		if errors.Is(context.Cause(ctx), errStepTimeout) || parent.Err() != nil {
-			return sr, ReasonTimeout
-		}
-		sr.Output, _ = json.Marshal(map[string]string{"error": reason})
-		return sr, ""
-	}
-	conn, err := s.connectBrowser(ctx)
-	if err != nil {
-		return fail(ReasonBrowserUnavailable)
-	}
-	defer conn.CloseNow()
-	c := &cdp{conn: conn}
-	var targets struct {
-		TargetInfos []struct {
-			TargetID string `json:"targetId"`
-			Type     string `json:"type"`
-		} `json:"targetInfos"`
-	}
-	if err := c.call(ctx, "", "Target.getTargets", map[string]any{}, &targets); err != nil {
-		return fail(ReasonBrowserUnavailable)
-	}
-	page := ""
-	for _, t := range targets.TargetInfos {
-		if t.Type == "page" {
-			page = t.TargetID
-			break
-		}
-	}
-	how := "navigated"
-	if page == "" {
-		// Last authority check before the only call that loads anything.
-		if r := revoked(); r != "" {
-			return sr, ReasonStoppedMidCall + ":" + r
-		}
-		var created struct {
-			TargetID string `json:"targetId"`
-		}
-		if err := c.call(ctx, "", "Target.createTarget", map[string]any{"url": step.url, "background": true}, &created); err != nil {
-			return fail("navigation_failed")
-		}
-		how = "created"
-	} else {
-		var attached struct {
-			SessionID string `json:"sessionId"`
-		}
-		if err := c.call(ctx, "", "Target.attachToTarget", map[string]any{"targetId": page, "flatten": true}, &attached); err != nil || attached.SessionID == "" {
-			return fail(ReasonBrowserUnavailable)
-		}
-		// Last authority check before the only call that loads anything.
-		if r := revoked(); r != "" {
-			_ = c.call(ctx, "", "Target.detachFromTarget", map[string]any{"sessionId": attached.SessionID}, nil)
-			return sr, ReasonStoppedMidCall + ":" + r
-		}
-		var nav struct {
-			ErrorText string `json:"errorText"`
-		}
-		err := c.call(ctx, attached.SessionID, "Page.navigate", map[string]any{"url": step.url}, &nav)
-		_ = c.call(ctx, "", "Target.detachFromTarget", map[string]any{"sessionId": attached.SessionID}, nil)
-		if err != nil || nav.ErrorText != "" {
-			return fail("navigation_failed")
-		}
-	}
-	sr.ExitCode = 0
-	sr.Output, _ = json.Marshal(map[string]any{"ok": true, how: true})
-	return sr, ""
 }

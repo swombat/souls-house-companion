@@ -25,10 +25,14 @@ type fakeChrome struct {
 	created   []map[string]any
 	launches  int
 	sessions  int
+	// Page state for the read and act verbs.
+	loader    string
+	actions   []string
+	onResolve func()
 }
 
 func newFakeChrome(t *testing.T, pages ...string) *fakeChrome {
-	fc := &fakeChrome{pages: pages}
+	fc := &fakeChrome{pages: pages, loader: "L1"}
 	fc.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/devtools/browser/") {
 			http.NotFound(w, r)
@@ -77,6 +81,34 @@ func newFakeChrome(t *testing.T, pages ...string) *fakeChrome {
 			case "Target.createTarget":
 				fc.created = append(fc.created, m.Params)
 				result["targetId"] = "new"
+			case "Page.getFrameTree":
+				result["frameTree"] = map[string]any{"frame": map[string]any{"id": "F", "loaderId": fc.loader, "url": "https://example.org/page"}}
+			case "Runtime.evaluate":
+				result["result"] = map[string]any{"type": "string", "value": "Example page"}
+			case "Accessibility.getFullAXTree":
+				result["nodes"] = fakeAXTree
+			case "DOM.resolveNode":
+				hook := fc.onResolve
+				id := m.Params["backendNodeId"].(float64)
+				if hook != nil {
+					fc.mu.Unlock()
+					hook()
+					fc.mu.Lock()
+				}
+				if id >= 100 {
+					fc.mu.Unlock()
+					_ = c.Write(ctx, websocket.MessageText, []byte(`{"id":`+itoa(m.ID)+`,"error":{"message":"No node with given id found"}}`))
+					continue
+				}
+				result["object"] = map[string]any{"objectId": "obj-" + itoa(int(id))}
+			case "Runtime.callFunctionOn":
+				fc.actions = append(fc.actions, "call "+m.Params["objectId"].(string))
+				result["result"] = map[string]any{"type": "boolean", "value": true}
+			case "Input.insertText":
+				fc.actions = append(fc.actions, "insert "+m.Params["text"].(string))
+			case "Input.dispatchKeyEvent":
+				text, _ := m.Params["text"].(string)
+				fc.actions = append(fc.actions, "key "+m.Params["type"].(string)+" "+m.Params["key"].(string)+" "+itoa(len(text)))
 			}
 			fc.mu.Unlock()
 			reply, _ := json.Marshal(map[string]any{"id": m.ID, "result": result})
@@ -230,20 +262,39 @@ func TestResidentBrowserRefusesAnEndpointOutsideAPrivateProfile(t *testing.T) {
 	}
 }
 
-func TestResidentBrowserOnlyTakesOpen(t *testing.T) {
+func TestResidentBrowserGrammar(t *testing.T) {
 	for _, args := range []string{
-		`{"command":"snapshot","app":"souls.house browser"}`,
+		`{"command":"find","app":"souls.house browser","name":"x"}`,
+		`{"command":"get","app":"souls.house browser","ref":"@b0123456789ab:e1"}`,
+		`{"command":"scroll","app":"souls.house browser","ref":"@b0123456789ab:e1"}`,
+		`{"command":"snapshot","app":"souls.house browser","max_depth":3}`,
+		`{"command":"snapshot","app":"souls.house browser","surface":"window"}`,
 		`{"command":"click","app":"souls.house browser","ref":"@a:e1"}`,
-		`{"command":"press","app":"souls.house browser","combo":"return"}`,
+		`{"command":"click","app":"souls.house browser","ref":"@b1:e0"}`,
+		`{"command":"click","app":"souls.house browser"}`,
+		`{"command":"type","app":"souls.house browser","ref":"@b1:e1","text":""}`,
+		`{"command":"press","app":"souls.house browser","combo":"cmd+q"}`,
+		`{"command":"press","app":"souls.house browser","combo":"cmd+l"}`,
+		`{"command":"press","app":"souls.house browser","combo":"f5"}`,
 		`{"command":"open","app":"souls.house browser","url":"file:///etc/passwd"}`,
+		`{"command":"open","app":"souls.house browser","url":"javascript:alert(1)"}`,
 	} {
 		if _, err := Parse(json.RawMessage(args)); err == nil {
 			t.Fatalf("accepted %s", args)
 		}
 	}
-	r := mustParse(t, browseURL)
-	if !r.Steps[0].browser || r.Steps[0].opener || len(r.Steps[0].argv) != 0 {
-		t.Fatalf("%+v", r.Steps[0])
+	for _, args := range []string{
+		browseURL,
+		`{"command":"snapshot","app":"souls.house browser"}`,
+		`{"command":"snapshot","app":"souls.house browser","interactive":true}`,
+		`{"command":"click","app":"souls.house browser","ref":"@b0123456789ab:e42"}`,
+		`{"command":"type","app":"souls.house browser","ref":"@b0123456789ab:e42","text":"slime mould"}`,
+		`{"command":"press","app":"souls.house browser","combo":"return"}`,
+	} {
+		r := mustParse(t, args)
+		if !r.Steps[0].browser || r.Steps[0].opener || len(r.Steps[0].argv) != 0 {
+			t.Fatalf("%s: %+v", args, r.Steps[0])
+		}
 	}
 }
 
@@ -288,5 +339,185 @@ func TestResidentBrowserStopsWhenControlIsRevokedDuringStart(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// fakeAXTree: a heading, a paragraph whose text node repeats it, a link, an
+// unnamed container, an ignored node and a search box.
+var fakeAXTree = []map[string]any{
+	{"nodeId": "1", "role": map[string]any{"value": "RootWebArea"}, "name": map[string]any{"value": "Example page"}, "childIds": []string{"2", "3", "5", "6", "7"}, "backendDOMNodeId": 1, "frameId": "F"},
+	{"nodeId": "2", "parentId": "1", "role": map[string]any{"value": "heading"}, "name": map[string]any{"value": "Physarum"}, "backendDOMNodeId": 10, "frameId": "F"},
+	{"nodeId": "3", "parentId": "1", "role": map[string]any{"value": "paragraph"}, "name": map[string]any{"value": ""}, "childIds": []string{"4"}, "backendDOMNodeId": 11, "frameId": "F"},
+	{"nodeId": "4", "parentId": "3", "role": map[string]any{"value": "StaticText"}, "name": map[string]any{"value": "A slime mould that solves mazes."}, "backendDOMNodeId": 12, "frameId": "F"},
+	{"nodeId": "5", "parentId": "1", "role": map[string]any{"value": "link"}, "name": map[string]any{"value": "Fairy ring"}, "childIds": []string{"8"}, "backendDOMNodeId": 13, "frameId": "F"},
+	{"nodeId": "8", "parentId": "5", "role": map[string]any{"value": "StaticText"}, "name": map[string]any{"value": "Fairy ring"}, "backendDOMNodeId": 17, "frameId": "F"},
+	{"nodeId": "6", "parentId": "1", "ignored": true, "role": map[string]any{"value": "generic"}, "name": map[string]any{"value": "hidden"}, "backendDOMNodeId": 14, "frameId": "F"},
+	{"nodeId": "7", "parentId": "1", "role": map[string]any{"value": "searchbox"}, "name": map[string]any{"value": "Search"}, "value": map[string]any{"value": ""}, "backendDOMNodeId": 15, "frameId": "F"},
+}
+
+type snapshotOut struct {
+	URL      string    `json:"url"`
+	Title    string    `json:"title"`
+	Elements []element `json:"elements"`
+}
+
+func snapshot(t *testing.T, f *fixture, interactive bool) snapshotOut {
+	t.Helper()
+	args := `{"command":"snapshot","app":"souls.house browser"}`
+	if interactive {
+		args = `{"command":"snapshot","app":"souls.house browser","interactive":true}`
+	}
+	r := f.do(args)
+	if r.Status != "completed" || len(r.Steps) != 1 || r.Steps[0].ExitCode != 0 {
+		t.Fatalf("snapshot: %+v", r)
+	}
+	var out snapshotOut
+	if err := json.Unmarshal(r.Steps[0].Output, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func refFor(t *testing.T, out snapshotOut, name string) string {
+	t.Helper()
+	for _, e := range out.Elements {
+		if e.Name == name && e.Ref != "" {
+			return e.Ref
+		}
+	}
+	t.Fatalf("no ref for %q in %+v", name, out.Elements)
+	return ""
+}
+
+func TestResidentBrowserSnapshotReadsThePage(t *testing.T) {
+	fc := newFakeChrome(t, "tab1")
+	f := browserFixture(t, fc)
+	out := snapshot(t, f, false)
+	if out.URL != "https://example.org/page" || out.Title != "Example page" {
+		t.Fatalf("%+v", out)
+	}
+	var got []string
+	for _, e := range out.Elements {
+		got = append(got, e.Role+":"+e.Name+":"+itoa(e.Depth))
+		if e.Ref != "" && !strings.HasPrefix(e.Ref, "@b") {
+			t.Fatalf("ref %q", e.Ref)
+		}
+	}
+	want := []string{"RootWebArea:Example page:0", "heading:Physarum:1", "StaticText:A slime mould that solves mazes.:1", "link:Fairy ring:1", "searchbox:Search:1"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("elements\n got %q\nwant %q", got, want)
+	}
+	inter := snapshot(t, f, true)
+	if len(inter.Elements) != 2 || inter.Elements[0].Role != "link" || inter.Elements[1].Role != "searchbox" {
+		t.Fatalf("interactive: %+v", inter.Elements)
+	}
+	if len(fc.actions) != 0 {
+		t.Fatalf("snapshot acted: %v", fc.actions)
+	}
+}
+
+func TestResidentBrowserClickTypeAndPress(t *testing.T) {
+	fc := newFakeChrome(t, "tab1")
+	f := browserFixture(t, fc)
+	out := snapshot(t, f, true)
+	link, box := refFor(t, out, "Fairy ring"), refFor(t, out, "Search")
+	if r := f.do(`{"command":"click","app":"souls.house browser","ref":"` + link + `"}`); r.Status != "completed" || r.Steps[0].ExitCode != 0 {
+		t.Fatalf("click: %+v", r)
+	}
+	r := f.do(`{"command":"type","app":"souls.house browser","ref":"` + box + `","text":"secret words"}`)
+	if r.Status != "completed" || r.Steps[0].ExitCode != 0 || strings.Contains(string(r.Steps[0].Output), "secret") {
+		t.Fatalf("type: %+v", r)
+	}
+	if r := f.do(`{"command":"press","app":"souls.house browser","combo":"return"}`); r.Status != "completed" || r.Steps[0].ExitCode != 0 {
+		t.Fatalf("press: %+v", r)
+	}
+	want := []string{"call obj-13", "call obj-15", "insert secret words", "key keyDown Enter 1", "key keyUp Enter 0"}
+	if strings.Join(fc.actions, "|") != strings.Join(want, "|") {
+		t.Fatalf("actions\n got %q\nwant %q", fc.actions, want)
+	}
+	audit, _ := os.ReadFile(filepath.Join(f.dir, AuditFile))
+	if strings.Contains(string(audit), "secret") || strings.Contains(string(audit), "Fairy") {
+		t.Fatalf("audit leaks: %s", audit)
+	}
+}
+
+// A ref is only good on the page load, on-period and resident it was read
+// from: after a navigation, a new on-period, or from another resident it is
+// stale, and nothing is clicked.
+func TestResidentBrowserRefusesStaleRefs(t *testing.T) {
+	cases := map[string]func(f *fixture, fc *fakeChrome) string{
+		"new page load": func(f *fixture, fc *fakeChrome) string {
+			fc.mu.Lock()
+			fc.loader = "L2"
+			fc.mu.Unlock()
+			return "mira"
+		},
+		"new on-period": func(f *fixture, fc *fakeChrome) string {
+			if err := TurnOff(f.dir); err != nil {
+				t.Fatal(err)
+			}
+			f.clock.Add(int64(time.Second))
+			if _, err := TurnOn(f.dir, f.sup.Now(), 15*time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			return "mira"
+		},
+		"forged prefix": func(f *fixture, fc *fakeChrome) string { return "forged" },
+	}
+	for name, change := range cases {
+		t.Run(name, func(t *testing.T) {
+			fc := newFakeChrome(t, "tab1")
+			f := browserFixture(t, fc)
+			link := refFor(t, snapshot(t, f, true), "Fairy ring")
+			if change(f, fc) == "forged" {
+				link = "@b000000000000" + link[strings.Index(link, ":"):]
+			}
+			r := f.do(`{"command":"click","app":"souls.house browser","ref":"` + link + `"}`)
+			if r.Status != "completed" || r.Steps[0].ExitCode == 0 || !strings.Contains(string(r.Steps[0].Output), "stale_ref") {
+				t.Fatalf("%+v %s", r, r.Steps[0].Output)
+			}
+			if len(fc.actions) != 0 {
+				t.Fatalf("acted on a stale ref: %v", fc.actions)
+			}
+		})
+	}
+}
+
+func TestResidentBrowserReadVerbsNeedATab(t *testing.T) {
+	fc := newFakeChrome(t)
+	f := browserFixture(t, fc)
+	r := f.do(`{"command":"snapshot","app":"souls.house browser"}`)
+	if r.Steps[0].ExitCode == 0 || !strings.Contains(string(r.Steps[0].Output), "no_page") || len(fc.created) != 0 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// Revocation between reading the ref and acting on it: nothing is clicked,
+// typed or pressed.
+func TestResidentBrowserStopsActingWhenRevoked(t *testing.T) {
+	for _, verb := range []string{"click", "type"} {
+		t.Run(verb, func(t *testing.T) {
+			fc := newFakeChrome(t, "tab1")
+			f := browserFixture(t, fc)
+			box := refFor(t, snapshot(t, f, true), "Search")
+			fc.mu.Lock()
+			fc.onResolve = func() {
+				if err := TurnOff(f.dir); err != nil {
+					t.Error(err)
+				}
+			}
+			fc.mu.Unlock()
+			args := `{"command":"click","app":"souls.house browser","ref":"` + box + `"}`
+			if verb == "type" {
+				args = `{"command":"type","app":"souls.house browser","ref":"` + box + `","text":"x"}`
+			}
+			r := f.do(args)
+			if r.Status != "stopped" || !strings.HasPrefix(r.Reason, ReasonStoppedMidCall+":") {
+				t.Fatalf("%+v", r)
+			}
+			if len(fc.actions) != 0 {
+				t.Fatalf("acted after revocation: %v", fc.actions)
+			}
+		})
 	}
 }
