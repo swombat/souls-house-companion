@@ -136,9 +136,9 @@ func TestRealResidentBrowserKeepsFocus(t *testing.T) {
 	}
 	t.Logf("typed and pressed: now %q", page.Title)
 	stale := find(page, "link", "")
-	do(`{"command":"click","app":"souls.house browser","ref":"` + find(read(true), "link", "Main page") + `"}`)
+	do(`{"command":"click","app":"souls.house browser","ref":"` + find(read(true), "link", "fungus") + `"}`)
 	time.Sleep(4 * time.Second)
-	if page = read(false); !strings.Contains(page.Title, "Wikipedia, the free encyclopedia") {
+	if page = read(false); !strings.Contains(page.Title, "Fung") {
 		t.Fatalf("after click: title %q", page.Title)
 	}
 	t.Logf("clicked: now %q", page.Title)
