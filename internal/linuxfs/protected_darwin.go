@@ -4,6 +4,7 @@ package linuxfs
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -215,6 +216,22 @@ func (r *Root) checkDirectory(fd int) error {
 			unix.Close(parent)
 			return err
 		}
+		if pid.fsid != r.rootID.fsid {
+			// On a Data volume, ".." of a firmlinked top-level directory
+			// (Users, Applications, ...) is the System volume's "/", not the
+			// Data root. Accept that only when current really is a direct
+			// child of the root; the root and its ancestors are then checked
+			// exactly as on the ordinary path. Anything else still refuses.
+			unix.Close(parent)
+			child, err := r.directChildOfRoot(id)
+			if err != nil {
+				return err
+			}
+			if !child {
+				return unix.EXDEV
+			}
+			return r.checkRootAncestors()
+		}
 		if pid == id {
 			unix.Close(parent)
 			return ErrContainment
@@ -223,6 +240,46 @@ func (r *Root) checkDirectory(fd int) error {
 		current = parent
 	}
 	return ErrContainment
+}
+
+// directChildOfRoot reports whether a directory with identity id is an entry
+// of the root itself, by statting the root's own entries without following
+// links. A rename racing the scan makes it false, which fails closed.
+func (r *Root) directChildOfRoot(id inode) (bool, error) {
+	dir, err := openComponent(r.fd, ".", true)
+	if err != nil {
+		return false, err
+	}
+	f := os.NewFile(uintptr(dir), ".")
+	defer f.Close()
+	names, err := f.Readdirnames(-1)
+	if err != nil {
+		return false, err
+	}
+	for _, name := range names {
+		var st unix.Stat_t
+		if unix.Fstatat(r.fd, name, &st, unix.AT_SYMLINK_NOFOLLOW) != nil {
+			continue
+		}
+		if st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Ino != id.ino {
+			continue
+		}
+		fd, err := openComponent(r.fd, name, true)
+		if err != nil {
+			continue
+		}
+		var cst unix.Stat_t
+		ok := unix.Fstat(fd, &cst) == nil
+		if ok {
+			cid, err := identity(fd, &cst)
+			ok = err == nil && cid == id
+		}
+		unix.Close(fd)
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // A protected directory may be an ancestor OUTSIDE the shared root, including
