@@ -29,6 +29,11 @@ esac
 printf '{"ok":true,"had_ref":"%s"}' "$had"
 `
 
+// The fake /usr/bin/open records its argv in the step's private TMPDIR.
+const fakeOpen = `#!/bin/sh
+printf '%s\n' "$@" > "${TMPDIR}open-argv"
+`
+
 type fixture struct {
 	t      *testing.T
 	dir    string
@@ -50,7 +55,11 @@ func newFixture(t *testing.T) *fixture {
 	}
 	f := &fixture{t: t, dir: dir}
 	f.clock.Store(time.Date(2026, 11, 9, 16, 0, 0, 0, time.UTC).UnixNano())
-	f.sup = &Supervisor{StateDir: dir, Binary: bin, Platform: "darwin",
+	opener := filepath.Join(binDir, "open")
+	if err := os.WriteFile(opener, []byte(fakeOpen), 0755); err != nil {
+		t.Fatal(err)
+	}
+	f.sup = &Supervisor{StateDir: dir, Binary: bin, Opener: opener, Platform: "darwin",
 		Now: func() time.Time { return time.Unix(0, f.clock.Load()) }}
 	f.remote = policy.Policy{Residents: []policy.Resident{{ID: "mira", Desktop: true}}}
 	if err := SaveScope(dir, Scope{Version: 1, Residents: []ResidentScope{{ID: "mira", Apps: []string{"Finder"}}}}); err != nil {
@@ -359,5 +368,28 @@ func TestPressMidBatchStopsAfterTheSemanticSteps(t *testing.T) {
 	argv, _ := os.ReadFile(filepath.Join(f.root(), "state", "argv"))
 	if !strings.HasPrefix(string(argv), "snapshot\n") {
 		t.Fatalf("last call must be the snapshot, got %q", argv)
+	}
+}
+
+func TestOpenRunsOpenInTheBackgroundForAnAppInScope(t *testing.T) {
+	f := newFixture(t)
+	f.on(time.Hour)
+	res := f.do(`{"command":"open","app":"Finder","url":"https://x.com/home"}`)
+	if res.Status != "completed" || len(res.Steps) != 1 || res.Steps[0].ExitCode != 0 {
+		t.Fatalf("open: %+v", res)
+	}
+	got, err := os.ReadFile(filepath.Join(f.root(), "tmp", "open-argv"))
+	if err != nil || string(got) != "-g\n-a\nFinder\nhttps://x.com/home\n" {
+		t.Fatalf("open argv %q (%v)", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(f.root(), "state", "argv")); !os.IsNotExist(err) {
+		t.Fatalf("open must not run agent-desktop: %v", err)
+	}
+	if res := f.do(`{"command":"open","app":"Google Chrome","url":"https://x.com/"}`); res.Status != "refused" || res.Reason != ReasonAppNotAllowed {
+		t.Fatalf("app outside scope: %+v", res)
+	}
+	f.remote = policy.Policy{Residents: []policy.Resident{{ID: "mira", Desktop: false}}}
+	if res := f.do(`{"command":"open","app":"Finder","url":"https://x.com/"}`); res.Status != "refused" {
+		t.Fatalf("open without the house desktop grant: %+v", res)
 	}
 }

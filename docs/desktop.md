@@ -42,7 +42,7 @@ restart always comes up off.
 
 Arguments are typed JSON fields; the companion builds argv itself. Every step
 names `app`, which must be in scope. Verbs: `snapshot`, `find`, `get`, `is`,
-`click`, `type`, `press`, `scroll`, and `batch` (1–16 of those, no nesting,
+`click`, `type`, `press`, `scroll`, `open`, and `batch` (1–16 of those, no nesting,
 each validated and re-authorised before it runs). Unknown keys refuse the
 whole request. Never emitted: `--headed`, `--force`, `--session`,
 `--agent-id`, `--trace*`, `--screenshot`, `--debug`, `-v`, any output path.
@@ -54,6 +54,13 @@ exclusive and exclude `limit`; a plain list search gets `--limit=50` unless a
 `limit` (1–200) is given. Values are `--flag=value` and refs/combos follow `--`, so no value
 can become a flag. Waits ≤30 s, `find` limit ≤200 (default 50),
 `timeout_seconds` 1–120 (house deadline ≤121 s).
+
+`open` takes `app` and `url` and runs `/usr/bin/open -g -a <app> <url>`, not
+agent-desktop: Launch Services hands the URL to the app without bringing it
+forward, and no key is sent. Only absolute `http`/`https` URLs with a host,
+no userinfo, in printable ASCII (percent-encoded), ≤2048 bytes. A browser
+opens it as a new tab in its front window, which may be the owner's; whether
+focus stays put is measured at acceptance, not assumed from `-g`.
 
 ## Process lifetime
 

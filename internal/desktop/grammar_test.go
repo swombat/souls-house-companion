@@ -102,3 +102,33 @@ func TestFindSelectionsAreExclusive(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenBuildsOpenArgvAndRefusesOtherSchemes(t *testing.T) {
+	r := mustParse(t, `{"command":"open","app":"Google Chrome","url":"https://x.com/home?a=1&b=%20#top"}`)
+	want := []string{"-g", "-a", "Google Chrome", "https://x.com/home?a=1&b=%20#top"}
+	if got := r.Steps[0].Argv(); !reflect.DeepEqual(got, want) || !r.Steps[0].opener {
+		t.Fatalf("open argv %q opener=%v, want %q", got, r.Steps[0].opener, want)
+	}
+	for _, s := range []string{
+		`{"command":"open","app":"Google Chrome"}`,
+		`{"command":"open","url":"https://x.com"}`,
+		`{"command":"open","app":"Google Chrome","url":"file:///etc/passwd"}`,
+		`{"command":"open","app":"Google Chrome","url":"javascript:alert(1)"}`,
+		`{"command":"open","app":"Google Chrome","url":"x-apple.systempreferences:com.apple.preference.security"}`,
+		`{"command":"open","app":"Google Chrome","url":"-a"}`,
+		`{"command":"open","app":"Google Chrome","url":"https://"}`,
+		`{"command":"open","app":"Google Chrome","url":"https:///path"}`,
+		`{"command":"open","app":"Google Chrome","url":"https://user:pw@x.com/"}`,
+		`{"command":"open","app":"Google Chrome","url":"https://x.com/a b"}`,
+		`{"command":"open","app":"Google Chrome","url":"https://x.com/\n"}`,
+		`{"command":"open","app":"Google Chrome","url":"https://exämple.com/"}`,
+		`{"command":"open","app":"Google Chrome","url":"HTTPS://x.com/"}`,
+		`{"command":"open","app":"Google Chrome","url":"https://x.com/` + strings.Repeat("a", MaxURLBytes) + `"}`,
+		`{"command":"open","app":"Google Chrome","url":"https://x.com","ref":"@abc:e1"}`,
+		`{"command":"open","app":"Google Chrome","url":["https://x.com"]}`,
+	} {
+		if _, err := Parse(json.RawMessage(s)); err == nil {
+			t.Errorf("accepted %s", s)
+		}
+	}
+}

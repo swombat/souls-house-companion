@@ -3,6 +3,7 @@ package desktop
 import (
 	"encoding/json"
 	"errors"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 const (
 	MaxBatchSteps = 16
 	MaxTextBytes  = 10000
+	MaxURLBytes   = 2048
 	maxField      = 256
 )
 
@@ -23,6 +25,8 @@ var (
 	refPattern    = regexp.MustCompile(`^@[a-z0-9]{1,40}:e[0-9]{1,7}$`)
 	windowPattern = regexp.MustCompile(`^w-[0-9]{1,12}$`)
 	comboPattern  = regexp.MustCompile("^[a-z0-9]+(\\+[a-z0-9,./;'\\[\\]\\\\=`-]+)*$|^[,./;'\\[\\]\\\\=`-]$")
+	// Printable ASCII URL characters only (RFC 3986, already percent-encoded).
+	urlPattern = regexp.MustCompile(`^https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$`)
 )
 
 var (
@@ -30,7 +34,7 @@ var (
 	getProps    = set("text", "value", "title", "bounds", "role", "states")
 	isProps     = set("visible", "enabled", "checked", "focused", "expanded", "selected")
 	directions  = set("up", "down", "left", "right")
-	verbs       = set("snapshot", "find", "get", "is", "click", "type", "press", "scroll")
+	verbs       = set("snapshot", "find", "get", "is", "click", "type", "press", "scroll", "open")
 	allowedKeys = map[string]map[string]bool{
 		"snapshot": set("command", "app", "interactive", "compact", "skeleton", "max_depth", "surface", "root", "window_id", "wait_for", "wait_timeout_ms"),
 		"find":     set("command", "app", "role", "name", "value", "text", "description", "native_id", "exact", "first", "last", "count", "nth", "limit", "surface", "root", "window_id"),
@@ -40,6 +44,7 @@ var (
 		"type":     set("command", "app", "ref", "text"),
 		"press":    set("command", "app", "combo"),
 		"scroll":   set("command", "app", "ref", "direction", "amount"),
+		"open":     set("command", "app", "url"),
 	}
 )
 
@@ -58,6 +63,8 @@ type Step struct {
 	argv    []string
 	stdin   []byte
 	waitMS  int
+	// opener: argv is for /usr/bin/open, not agent-desktop.
+	opener bool
 }
 
 // Argv returns the arguments after the binary path.
@@ -322,6 +329,18 @@ func parseStep(f map[string]json.RawMessage) (Step, error) {
 			flag("amount", strconv.Itoa(n))
 		}
 		a = append(a, "--", r)
+	case "open":
+		var u string
+		if json.Unmarshal(f["url"], &u) != nil || !validURL(u) {
+			return s, errInvalid
+		}
+		// -g: Launch Services hands the URL to the app without bringing it
+		// to the front, and no keystroke is involved, so nothing can land in
+		// a field the owner has focused. The app opens it its own way (for a
+		// browser, a new tab in its front window, which may be the owner's).
+		s.opener = true
+		s.argv = []string{"-g", "-a", app, u}
+		return s, nil
 	}
 	s.argv = a
 	return s, nil
@@ -373,4 +392,18 @@ func intField(raw json.RawMessage, lo, hi int) (int, error) {
 		return 0, errInvalid
 	}
 	return n, nil
+}
+
+// validURL accepts an absolute http(s) URL with a host and no userinfo, in
+// printable ASCII. No other scheme is opened: file:, javascript: and app URL
+// schemes would reach other handlers than the app in scope.
+func validURL(v string) bool {
+	if len(v) > MaxURLBytes || !urlPattern.MatchString(v) {
+		return false
+	}
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Opaque != "" {
+		return false
+	}
+	return u.Hostname() != ""
 }
