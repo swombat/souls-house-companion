@@ -58,7 +58,14 @@ func TestCancellationDoesNotWaitForBlockedWorkersOrGrowThemOnReconnect(t *testin
 			send(Request{Type: "request", ID: fmt.Sprint(i), DeviceID: "device", Epoch: "epoch",
 				Deadline: time.Now().Add(20 * time.Second)})
 		}
-		_, _, _ = ws.Read(r.Context())
+		// Hold the socket open until the client closes it. The client also
+		// sends its ceiling report after "ready", so drain rather than
+		// treating the first frame as the close.
+		for {
+			if _, _, err := ws.Read(r.Context()); err != nil {
+				return
+			}
+		}
 	}))
 	defer server.Close()
 	c := New(handlerFunc(func(context.Context, Request, policy.Policy) ([]byte, string, error) {

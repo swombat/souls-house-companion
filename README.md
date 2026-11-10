@@ -11,6 +11,11 @@ Mira leads implementation; Lume reviews.
 Read/write permissions are per mounted volume; execute is per computer. A local
 ceiling independently limits remote grants. Execute runs with the service user's
 OS authority; broad write access can also enable persistent execution.
+On each connection, after the house's `ready`, the companion reports its
+ceiling's volume keys and access per resident (no paths, no execute flag),
+tagged with that connection's epoch. The house uses it only to offer folder
+changes on its owner page; it authorises nothing, and every request is still
+checked against the local ceiling here.
 
 Go 1.27.2 is pinned. Development checks:
 
