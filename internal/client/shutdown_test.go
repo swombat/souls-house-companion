@@ -54,9 +54,20 @@ func shutdownFixture(t *testing.T, h Handler, operations ...string) (*Client, St
 				send(Request{Type: "request", ID: string(rune('a' + i)), DeviceID: "device", Epoch: "epoch",
 					Operation: operation, Deadline: time.Now().Add(20 * time.Second)})
 			}
-			// CloseRead lets cancellation unblock this fixture even when the
-			// test does not inject a terminal frame.
-			ctx := ws.CloseRead(r.Context())
+			// Drain what the companion sends (its ceiling report after
+			// "ready") without closing: CloseRead would close the socket on
+			// that report and turn every exit below into a socket close.
+			// Cancellation still unblocks the fixture when no terminal frame
+			// is injected.
+			ctx, closed := context.WithCancel(r.Context())
+			go func() {
+				defer closed()
+				for {
+					if _, _, err := ws.Read(ctx); err != nil {
+						return
+					}
+				}
+			}()
 			select {
 			case raw := <-terminal:
 				if raw != nil {
