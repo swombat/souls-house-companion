@@ -61,7 +61,10 @@ self-signed local identity on first use (its own keychain under
 `~/Library/Application Support/souls-house/signing/`), so the designated
 requirement becomes `identifier "house.souls.companion" and certificate leaf`,
 the same for every build. The first grant after switching to it still needs
-remove (−) and re-add (+). Verify `accessibility.trusted` after each upgrade
+remove (−) and re-add (+). That key lets a replacement binary keep the grant,
+so `~/Library/Application Support/souls-house` is a protected path like the
+LaunchAgents directory: residents cannot read, copy or change it through the
+filesystem tool. `execute` can, as it can anything the owner can. Verify `accessibility.trusted` after each upgrade
 instead of assuming it transferred.
 
 Binary/plist/state/credential and LaunchAgents are protected by opened identity

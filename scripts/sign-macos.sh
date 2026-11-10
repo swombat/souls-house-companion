@@ -8,10 +8,16 @@
 # which stays the same across builds, so one grant covers later updates.
 #
 # The certificate is self-signed and lives in its own keychain under the
-# owner's Application Support, created on first use. It gives nothing beyond
-# what the owner account already has: whoever can write this keychain can
-# already replace ~/.local/bin/souls-house-companion. It is not Developer ID
+# owner's Application Support, created on first use. It is not Developer ID
 # and not notarised.
+#
+# The key IS an authority: a binary signed with it keeps this Mac's
+# Accessibility grant, which a replacement ad-hoc binary would lose. So the
+# companion treats ~/Library/Application Support/souls-house as protected:
+# residents cannot read, copy, change, move or trash it through the
+# filesystem tool (by path or alias). Anything running as the owner outside
+# the companion's tools (including resident `execute`, which is full user
+# authority by design) can still reach it.
 #
 # Usage: scripts/sign-macos.sh <binary>   (signs in place; run as the owner)
 set -eu

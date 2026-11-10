@@ -278,9 +278,35 @@ func prepareProtectedPaths(home, dir, unit, exe string) ([]string, error) {
 	if err != nil || !st.IsDir() {
 		return nil, errors.New("LaunchAgents must be a real directory")
 	}
+	signing, err := prepareSigningDir(home)
+	if err != nil {
+		return nil, err
+	}
 	// Entire LaunchAgents subtree prevents sibling-plist persistence through
-	// the filesystem tool. Execute still has full user authority, by design.
-	return []string{dir, filepath.Join(dir, "state.json"), unit, exe, agents}, nil
+	// the filesystem tool. The signing subtree holds the local code-signing
+	// key (scripts/sign-macos.sh): whoever can read it can sign a replacement
+	// binary that keeps this Mac's Accessibility grant, so residents may not
+	// read, copy or change it. Execute still has full user authority, by design.
+	return []string{dir, filepath.Join(dir, "state.json"), unit, exe, agents, signing}, nil
+}
+
+// signingDirName is the owner's local signing home, shared with
+// scripts/sign-macos.sh (which keeps its keychain under "signing" inside it).
+const signingDirName = "Library/Application Support/souls-house"
+
+// prepareSigningDir makes sure the signing home exists as a real 0700
+// directory, so it has an identity to pin before the first resident request,
+// even on a Mac where the owner has not signed anything yet.
+func prepareSigningDir(home string) (string, error) {
+	path := filepath.Join(home, filepath.FromSlash(signingDirName))
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return "", err
+	}
+	st, err := os.Lstat(path)
+	if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("signing directory must be a real directory")
+	}
+	return path, nil
 }
 
 var _ io.Writer = (*limitedManagerOutput)(nil)
