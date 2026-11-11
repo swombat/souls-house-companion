@@ -39,3 +39,37 @@ No installed service or completed Dell acceptance is claimed by this source
 change. A Linux-cross-built macOS command-line preview is under development;
 see [its boundaries and acceptance gates](docs/macos.md). No Mac runtime
 acceptance or Windows support is claimed.
+
+## Releases
+
+`.github/workflows/release.yml` runs on a pushed `v*` tag or manually
+(`workflow_dispatch`), on `macos-15` (Apple Silicon; both binaries are checked
+to be arm64). It builds the darwin/arm64
+command-line companion (`scripts/build-macos.sh`) and the menu bar app
+(`scripts/build-menubar.sh`) and packages both as
+`souls-house-companion-<version>-darwin-arm64.zip` with a `SHA256SUMS` file
+(version is the tag, or `dev-<shortsha>` on manual runs).
+
+Repository secrets, all six or none (a partial set fails the run): `APPLE_DEVELOPER_ID_P12_BASE64`,
+`APPLE_DEVELOPER_ID_P12_PASSWORD`, `APPLE_TEAM_ID`, `APPLE_NOTARY_KEY_ID`,
+`APPLE_NOTARY_ISSUER_ID`, `APPLE_NOTARY_KEY_P8_BASE64`.
+
+- **All six present:** both binaries are signed with the Developer ID
+  Application identity (hardened runtime, timestamp), notarised with
+  `notarytool`, the app is stapled, and the result is verified. Any failure in
+  those steps fails the run; there is no fallback to unsigned. A pushed tag
+  then gets a **draft** GitHub release with the zip and `SHA256SUMS`, created
+  only after verification passed; a manual run only keeps the signed zip as a
+  14-day workflow artifact.
+- **None present:** the zip is built unsigned (`...-UNSIGNED.zip`) and uploaded
+  only as a 14-day workflow artifact named `...UNSIGNED-not-for-distribution...`.
+  No release is created and the run summary says so. Never link it publicly.
+- **Early unsigned build, on purpose:** a manual run with `early_unsigned`
+  checked, and only when none of the six secrets exists (with any of them the
+  run fails instead; a partial set fails every run), also publishes that unsigned zip as a **prerelease** tagged
+  `early-unsigned-<full sha>` (an existing tag is refused), titled UNSIGNED. That is what the house's "Download it
+  early" button may link, with the sha256 from `SHA256SUMS` shown beside it. It is
+  never the main release.
+
+The house's main download button links a build only after a signed, notarised
+build has been opened on a clean Mac. Publishing the draft release is a separate, manual step.
