@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,8 +16,12 @@ import (
 // snapshot is what the tray shows. Anything unreadable is "not answering",
 // never "running", and nothing is carried over from an earlier read.
 type snapshot struct {
-	reachable bool
+	reachable bool // the companion answered status and is enrolled
 	paused    bool
+	// active: its user service is actually running. Enrolled and not paused
+	// is not enough on its own (Mira, #32): the service may never have been
+	// installed, or may have stopped.
+	active bool
 }
 
 func (s snapshot) mark() mark {
@@ -25,36 +30,39 @@ func (s snapshot) mark() mark {
 		return markUnknown
 	case s.paused:
 		return markPaused
-	default:
+	case s.active:
 		return markRunning
+	default:
+		return markUnknown
 	}
 }
 
+// canToggle: Pause needs a running service, Resume needs a paused one.
+func (s snapshot) canToggle() bool {
+	return s.reachable && (s.paused || s.active)
+}
+
 func (s snapshot) label() string {
-	switch s.mark() {
-	case markRunning:
+	switch {
+	case s.mark() == markRunning:
 		return "Companion: running"
-	case markPaused:
+	case s.mark() == markPaused:
 		return "Companion: paused"
+	case s.reachable:
+		return "Companion: not running"
 	default:
 		return "Companion: not answering"
 	}
 }
 
 func (s snapshot) tooltip() string {
-	switch s.mark() {
-	case markRunning:
-		return "souls.house: companion running"
-	case markPaused:
-		return "souls.house: companion paused"
-	default:
-		return "souls.house: companion not answering"
-	}
+	return "souls.house: companion " + strings.TrimPrefix(s.label(), "Companion: ")
 }
 
-// parseStatus reads `souls-house-companion status --json`. An unenrolled
-// companion counts as not answering: there is nothing to pause or resume.
-func parseStatus(out []byte, err error) snapshot {
+// parseStatus reads `souls-house-companion status --json` and whether the
+// companion's user service is active. An unenrolled companion counts as not
+// answering: there is nothing to pause or resume.
+func parseStatus(out []byte, err error, active bool) snapshot {
 	if err != nil {
 		return snapshot{}
 	}
@@ -65,7 +73,17 @@ func parseStatus(out []byte, err error) snapshot {
 	if json.Unmarshal(out, &st) != nil || st.Paused == nil || st.Enrolled == nil || !*st.Enrolled {
 		return snapshot{}
 	}
-	return snapshot{reachable: true, paused: *st.Paused}
+	return snapshot{reachable: true, paused: *st.Paused, active: active}
+}
+
+const companionUnit = "souls-house-companion.service"
+
+// serviceActive asks the user manager; anything but "active" is not running.
+func serviceActive() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "systemctl", "--user", "is-active", companionUnit).Output()
+	return err == nil && strings.TrimSpace(string(out)) == "active"
 }
 
 // companionPath prefers the companion beside the tray (they ship together),

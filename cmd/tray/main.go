@@ -43,6 +43,7 @@ func command(args []string) error {
 
 type tray struct {
 	mu         sync.Mutex
+	renderMu   sync.Mutex // one complete render at a time (the systray setters are unsynchronised)
 	snap       snapshot
 	inProgress string
 	failed     string
@@ -102,7 +103,8 @@ func (t *tray) refresh() {
 	t.mu.Unlock()
 	generation := t.coord.beginObservation()
 	go func() {
-		snap := parseStatus(runCompanion(8*time.Second, "status", "--json"))
+		out, err := runCompanion(8*time.Second, "status", "--json")
+		snap := parseStatus(out, err, serviceActive())
 		t.mu.Lock()
 		t.refreshing = false
 		if t.coord.isCurrent(generation) {
@@ -115,7 +117,7 @@ func (t *tray) refresh() {
 
 func (t *tray) togglePause() {
 	t.mu.Lock()
-	if !t.snap.reachable {
+	if !t.snap.canToggle() || t.inProgress != "" {
 		t.mu.Unlock()
 		return
 	}
@@ -144,7 +146,11 @@ func (t *tray) togglePause() {
 	})
 }
 
+// render publishes the newest state as one unit: the state is read inside the
+// render lock, so whichever render finishes last shows the latest state.
 func (t *tray) render() {
+	t.renderMu.Lock()
+	defer t.renderMu.Unlock()
 	t.mu.Lock()
 	snap, inProgress, failed := t.snap, t.inProgress, t.failed
 	t.mu.Unlock()
@@ -155,7 +161,7 @@ func (t *tray) render() {
 	case inProgress != "":
 		t.toggle.SetTitle(inProgress + "…")
 		t.toggle.Disable()
-	case !snap.reachable:
+	case !snap.canToggle():
 		t.toggle.SetTitle("Pause companion")
 		t.toggle.Disable()
 	case snap.paused:

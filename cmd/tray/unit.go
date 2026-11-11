@@ -80,12 +80,22 @@ func installUnit() error {
 	return systemctlUser("enable", "--now", trayUnit)
 }
 
+// uninstallUnit stops and disables the tray, then removes its unit. If the
+// stop or disable fails it stops there and reports it, leaving the unit file,
+// rather than claim the tray is gone while it may still be running.
 func uninstallUnit() error {
 	path, err := trayUnitPath()
 	if err != nil {
 		return err
 	}
-	_ = systemctlUser("disable", "--now", trayUnit)
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := systemctlUser("disable", "--now", trayUnit); err != nil {
+		return err
+	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}

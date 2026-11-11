@@ -15,25 +15,93 @@ import (
 
 func TestParseStatus(t *testing.T) {
 	cases := []struct {
-		name string
-		out  string
-		err  error
-		want snapshot
+		name   string
+		out    string
+		err    error
+		active bool
+		want   snapshot
+		mark   mark
+		label  string
+		toggle bool
 	}{
-		{"running", `{"paused":false,"enrolled":true}`, nil, snapshot{reachable: true}},
-		{"paused", `{"paused":true,"enrolled":true}`, nil, snapshot{reachable: true, paused: true}},
-		{"unenrolled", `{"paused":false,"enrolled":false}`, nil, snapshot{}},
-		{"missing paused", `{"enrolled":true}`, nil, snapshot{}},
-		{"garbage", `not json`, nil, snapshot{}},
-		{"command failed", `{"paused":false,"enrolled":true}`, errors.New("exit 1"), snapshot{}},
+		{"running", `{"paused":false,"enrolled":true}`, nil, true, snapshot{reachable: true, active: true}, markRunning, "Companion: running", true},
+		// Enrolled and not paused, but the service is not running (never installed, or stopped).
+		{"not running", `{"paused":false,"enrolled":true}`, nil, false, snapshot{reachable: true}, markUnknown, "Companion: not running", false},
+		// Paused stops the service; Resume must still be offered.
+		{"paused", `{"paused":true,"enrolled":true}`, nil, false, snapshot{reachable: true, paused: true}, markPaused, "Companion: paused", true},
+		{"unenrolled", `{"paused":false,"enrolled":false}`, nil, true, snapshot{}, markUnknown, "Companion: not answering", false},
+		{"missing paused", `{"enrolled":true}`, nil, true, snapshot{}, markUnknown, "Companion: not answering", false},
+		{"garbage", `not json`, nil, true, snapshot{}, markUnknown, "Companion: not answering", false},
+		{"command failed", `{"paused":false,"enrolled":true}`, errors.New("exit 1"), true, snapshot{}, markUnknown, "Companion: not answering", false},
 	}
 	for _, c := range cases {
-		if got := parseStatus([]byte(c.out), c.err); got != c.want {
-			t.Errorf("%s: got %+v want %+v", c.name, got, c.want)
+		got := parseStatus([]byte(c.out), c.err, c.active)
+		if got != c.want || got.mark() != c.mark || got.label() != c.label || got.canToggle() != c.toggle {
+			t.Errorf("%s: got %+v mark=%d label=%q toggle=%v", c.name, got, got.mark(), got.label(), got.canToggle())
 		}
 	}
-	if (snapshot{}).mark() != markUnknown || (snapshot{reachable: true, paused: true}).mark() != markPaused {
-		t.Fatal("mark mapping")
+	if tip := (snapshot{reachable: true, active: true}).tooltip(); tip != "souls.house: companion running" {
+		t.Errorf("tooltip %q", tip)
+	}
+}
+
+// A fake systemctl on PATH that records its arguments and fails when told to.
+func fakeSystemctl(t *testing.T, failOn string) (log string) {
+	t.Helper()
+	bin := t.TempDir()
+	log = filepath.Join(bin, "calls")
+	script := "#!/bin/sh\necho \"$*\" >> " + log + "\ncase \"$*\" in *" + failOn + "*) [ -n \"" + failOn + "\" ] && exit 1;; esac\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	return log
+}
+
+func TestUninstallStopsBeforeRemoving(t *testing.T) {
+	fakeSystemctl(t, "disable")
+	path, err := trayUnitPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("[Unit]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := uninstallUnit(); err == nil {
+		t.Fatal("a failed disable --now must fail uninstall")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("the unit must stay when the tray could not be stopped")
+	}
+}
+
+func TestUninstallRemovesUnit(t *testing.T) {
+	log := fakeSystemctl(t, "")
+	path, _ := trayUnitPath()
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	_ = os.WriteFile(path, []byte("[Unit]\n"), 0o600)
+	if err := uninstallUnit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("unit should be gone")
+	}
+	calls, _ := os.ReadFile(log)
+	if !strings.Contains(string(calls), "--user disable --now souls-house-tray.service") ||
+		!strings.Contains(string(calls), "--user daemon-reload") {
+		t.Fatalf("calls: %s", calls)
+	}
+	// Nothing installed: nothing to do, and no systemctl call.
+	_ = os.Remove(log)
+	if err := uninstallUnit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(log); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("no unit file: uninstall should not call systemctl")
 	}
 }
 
