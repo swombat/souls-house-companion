@@ -6,6 +6,8 @@ name: Companion release
 # them the zip is produced as an UNSIGNED workflow artifact and no release is
 # created. If the secrets ARE present, any signing, notarisation, stapling or
 # verification failure fails the job: there is no fallback to the unsigned path.
+# The linux job builds static linux/amd64 and linux/arm64 tarballs alongside;
+# Linux has no signing step, and they ship in whichever release the Mac build does.
 # See "Releases" in README.md.
 
 on:
@@ -298,14 +300,56 @@ jobs:
           fi
           rm -f "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP/notary-key.p8" "$RUNNER_TEMP/notarise.zip"
 
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.2'
+          cache: true
+      - name: Compute version
+        id: version
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = tag ]; then version="$REF_NAME"; else version="dev-${SHA:0:7}"; fi
+          printf '%s' "$version" | grep -Eq '^[A-Za-z0-9._-]+$' || { echo "unsafe version: $version" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build linux/amd64 and linux/arm64 (scripts/build-linux.sh asserts the ELF machine)
+        run: sh scripts/build-linux.sh release-linux "${{ steps.version.outputs.version }}"
+      - name: Smoke-run the amd64 binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf smoke && mkdir smoke
+          tar -xzf release-linux/*-linux-amd64.tar.gz -C smoke
+          got=$(smoke/*/souls-house-companion version)
+          [ "$got" = "${{ steps.version.outputs.version }}" ] || { echo "version printed $got" >&2; exit 1; }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: companion-linux-${{ steps.version.outputs.version }}
+          path: |
+            release-linux/*-linux-*.tar.gz
+            release-linux/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
   # Separate job so that only this one holds contents: write. It runs only for a
   # pushed tag, only when the build job succeeded (so signing, notarisation,
   # stapling and verification all passed) and the build was signed.
   release:
-    needs: build
+    needs: [build, linux]
     if: >-
-      needs.build.result == 'success' && needs.build.outputs.signed == 'true' &&
-      github.event_name == 'push' && github.ref_type == 'tag'
+      needs.build.result == 'success' && needs.linux.result == 'success' &&
+      needs.build.outputs.signed == 'true' && github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -315,9 +359,18 @@ jobs:
         with:
           name: companion-signed-${{ needs.build.outputs.version }}
           path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: companion-linux-${{ needs.linux.outputs.version }}
+          path: release-linux
       - name: Check checksums
-        working-directory: release
-        run: sha256sum -c SHA256SUMS
+        run: |
+          set -euo pipefail
+          (cd release && sha256sum -c SHA256SUMS)
+          (cd release-linux && sha256sum -c SHA256SUMS)
+          mv release-linux/*-linux-*.tar.gz release/
+          cat release-linux/SHA256SUMS >> release/SHA256SUMS
+          (cd release && sha256sum -c SHA256SUMS)
       - name: Create DRAFT release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -327,17 +380,17 @@ jobs:
           set -euo pipefail
           gh release create "$TAG" --repo "$REPO" --draft --verify-tag \
             --title "$TAG" \
-            --notes "Signed and notarised darwin/arm64 build. Draft: open it on a clean Mac before publishing or linking." \
-            release/souls-house-companion-*-darwin-arm64.zip release/SHA256SUMS
+            --notes "Signed and notarised darwin/arm64 build, plus linux/amd64 and linux/arm64 tarballs. Draft: open it on a clean Mac before publishing or linking." \
+            release/souls-house-companion-*-darwin-arm64.zip release/*-linux-*.tar.gz release/SHA256SUMS
 
   # The early, unsigned build: only by hand, only when the signing secrets are
   # absent (a build with them is never published unsigned), and only as a
   # prerelease whose tag and title say so. Never the main release.
   early-unsigned:
-    needs: build
+    needs: [build, linux]
     if: >-
-      needs.build.result == 'success' && needs.build.outputs.signed == 'false' &&
-      github.event_name == 'workflow_dispatch' && inputs.early_unsigned
+      needs.build.result == 'success' && needs.linux.result == 'success' &&
+      needs.build.outputs.signed == 'false' && github.event_name == 'workflow_dispatch' && inputs.early_unsigned
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -347,9 +400,18 @@ jobs:
         with:
           name: companion-UNSIGNED-not-for-distribution-${{ needs.build.outputs.version }}
           path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: companion-linux-${{ needs.linux.outputs.version }}
+          path: release-linux
       - name: Check checksums
-        working-directory: release
-        run: sha256sum -c SHA256SUMS
+        run: |
+          set -euo pipefail
+          (cd release && sha256sum -c SHA256SUMS)
+          (cd release-linux && sha256sum -c SHA256SUMS)
+          mv release-linux/*-linux-*.tar.gz release/
+          cat release-linux/SHA256SUMS >> release/SHA256SUMS
+          (cd release && sha256sum -c SHA256SUMS)
       - name: Create the early-unsigned prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -370,8 +432,8 @@ jobs:
           fi
           gh release create "$tag" --repo "$REPO" --prerelease --target "$SHA" \
             --title "Early build, UNSIGNED ($tag)" \
-            --notes "Not signed or notarised by Apple. macOS blocks it the first time: System Settings → Privacy & Security → Open Anyway. Each update asks for Accessibility again. Replaced by the signed build once Apple approves. sha256 is in SHA256SUMS." \
-            release/*-UNSIGNED.zip release/SHA256SUMS
+            --notes "Mac: not signed or notarised by Apple. macOS blocks it the first time: System Settings → Privacy & Security → Open Anyway. Each update asks for Accessibility again. Replaced by the signed build once Apple approves. Linux: static amd64 and arm64 tarballs (Linux has no signing step); early build, see README.md inside. sha256 for every file is in SHA256SUMS." \
+            release/*-UNSIGNED.zip release/*-linux-*.tar.gz release/SHA256SUMS
           {
             echo "### Early unsigned prerelease: $tag"
             echo

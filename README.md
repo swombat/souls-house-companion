@@ -50,6 +50,13 @@ command-line companion (`scripts/build-macos.sh`) and the menu bar app
 `souls-house-companion-<version>-darwin-arm64.zip` with a `SHA256SUMS` file
 (version is the tag, or `dev-<shortsha>` on manual runs).
 
+A separate `linux` job on `ubuntu-24.04` builds static linux/amd64 and
+linux/arm64 tarballs (`scripts/build-linux.sh`, which checks each ELF machine
+type; `docs/linux.md` goes inside as README.md). Linux has no signing step:
+the tarballs ship in whichever release the Mac build does (the signed draft,
+or the early-unsigned prerelease), and their sums are appended to the same
+`SHA256SUMS`.
+
 Repository secrets, all six or none (a partial set fails the run): `APPLE_DEVELOPER_ID_P12_BASE64`,
 `APPLE_DEVELOPER_ID_P12_PASSWORD`, `APPLE_TEAM_ID`, `APPLE_NOTARY_KEY_ID`,
 `APPLE_NOTARY_ISSUER_ID`, `APPLE_NOTARY_KEY_P8_BASE64`.

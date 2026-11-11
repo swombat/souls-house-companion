@@ -27,6 +27,8 @@ jobs:
         run: go test -race ./...
       - name: Build
         run: go build ./...
+      - name: Linux release tarballs (ELF arch checks)
+        run: sh scripts/build-linux.sh
       - name: Darwin cross-build and Mach-O checks (not runtime tests)
         run: sh scripts/build-macos.sh
       - name: Compile Darwin tests without executing them
