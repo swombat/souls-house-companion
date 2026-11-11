@@ -16,8 +16,8 @@ on:
     inputs:
       early_unsigned:
         description: >-
-          Publish this UNSIGNED build as a clearly named prerelease (early-unsigned-<sha>) for the
-          house's "Download it early" button. Refused when the Apple signing secrets exist.
+          Publish this UNSIGNED build as a clearly named prerelease (early-unsigned-<full sha>) for the
+          house's "Download it early" button. Refused unless none of the Apple signing secrets exists.
         type: boolean
         default: false
 
@@ -73,11 +73,9 @@ jobs:
           EARLY_UNSIGNED: ${{ inputs.early_unsigned || false }}
         run: |
           set -euo pipefail
-          if [ -n "$S1" ] && [ -n "$S2" ] && [ -n "$S3" ] && [ -n "$S4" ] && [ -n "$S5" ] && [ -n "$S6" ]; then
-            if [ "$EARLY_UNSIGNED" = true ]; then
-              echo "early_unsigned was asked for, but the signing secrets exist: refusing to publish an unsigned build." >&2
-              exit 1
-            fi
+          # All six or none; early only with none (scripts/release-mode.sh, tested in linux.yml).
+          mode=$(sh scripts/release-mode.sh)
+          if [ "$mode" = signed ]; then
             echo "signed=true" >> "$GITHUB_OUTPUT"
             echo "SIGNED=true" >> "$GITHUB_ENV"
             echo "ZIP_NAME=$STAGE_NAME.zip" >> "$GITHUB_ENV"
@@ -359,7 +357,13 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          tag="early-unsigned-${SHA:0:7}"
+          # Full sha, and never reuse a tag: --target is ignored for an existing
+          # tag, which would attach these binaries to another commit's source.
+          tag="early-unsigned-$SHA"
+          if gh api "repos/$REPO/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "tag $tag already exists: refusing to attach a new build to it" >&2
+            exit 1
+          fi
           gh release create "$tag" --repo "$REPO" --prerelease --target "$SHA" \
             --title "Early build, UNSIGNED ($tag)" \
             --notes "Not signed or notarised by Apple. macOS blocks it the first time: System Settings → Privacy & Security → Open Anyway. Each update asks for Accessibility again. Replaced by the signed build once Apple approves. sha256 is in SHA256SUMS." \

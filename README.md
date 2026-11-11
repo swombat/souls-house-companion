@@ -50,7 +50,7 @@ command-line companion (`scripts/build-macos.sh`) and the menu bar app
 `souls-house-companion-<version>-darwin-arm64.zip` with a `SHA256SUMS` file
 (version is the tag, or `dev-<shortsha>` on manual runs).
 
-Repository secrets, all six required: `APPLE_DEVELOPER_ID_P12_BASE64`,
+Repository secrets, all six or none (a partial set fails the run): `APPLE_DEVELOPER_ID_P12_BASE64`,
 `APPLE_DEVELOPER_ID_P12_PASSWORD`, `APPLE_TEAM_ID`, `APPLE_NOTARY_KEY_ID`,
 `APPLE_NOTARY_ISSUER_ID`, `APPLE_NOTARY_KEY_P8_BASE64`.
 
@@ -61,13 +61,13 @@ Repository secrets, all six required: `APPLE_DEVELOPER_ID_P12_BASE64`,
   then gets a **draft** GitHub release with the zip and `SHA256SUMS`, created
   only after verification passed; a manual run only keeps the signed zip as a
   14-day workflow artifact.
-- **Any missing:** the zip is built unsigned (`...-UNSIGNED.zip`) and uploaded
+- **None present:** the zip is built unsigned (`...-UNSIGNED.zip`) and uploaded
   only as a 14-day workflow artifact named `...UNSIGNED-not-for-distribution...`.
   No release is created and the run summary says so. Never link it publicly.
 - **Early unsigned build, on purpose:** a manual run with `early_unsigned`
-  checked, and only when the six secrets are absent (with them the run fails
-  instead), also publishes that unsigned zip as a **prerelease** tagged
-  `early-unsigned-<sha>`, titled UNSIGNED. That is what the house's "Download it
+  checked, and only when none of the six secrets exists (with any of them the
+  run fails instead; a partial set fails every run), also publishes that unsigned zip as a **prerelease** tagged
+  `early-unsigned-<full sha>` (an existing tag is refused), titled UNSIGNED. That is what the house's "Download it
   early" button may link, with the sha256 from `SHA256SUMS` shown beside it. It is
   never the main release.
 

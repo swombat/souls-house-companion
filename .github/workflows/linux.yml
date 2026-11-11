@@ -19,6 +19,8 @@ jobs:
           cache: true
       - name: Format
         run: test -z "$(gofmt -l .)"
+      - name: Release mode (secrets all-or-none, early only with none)
+        run: sh scripts/test-release-mode.sh
       - name: Vet
         run: go vet ./...
       - name: Race tests
