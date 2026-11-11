@@ -13,13 +13,22 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      early_unsigned:
+        description: >-
+          Publish this UNSIGNED build as a clearly named prerelease (early-unsigned-<sha>) for the
+          house's "Download it early" button. Refused when the Apple signing secrets exist.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   build:
-    runs-on: macos-14
+    # Apple Silicon. macos-14 was retired on 2 November 2026; the job asserts
+    # the architecture of both binaries below rather than trusting the label.
+    runs-on: macos-15
     timeout-minutes: 60
     outputs:
       signed: ${{ steps.secrets.outputs.signed }}
@@ -61,9 +70,14 @@ jobs:
           S4: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           S5: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
           S6: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          EARLY_UNSIGNED: ${{ inputs.early_unsigned || false }}
         run: |
           set -euo pipefail
           if [ -n "$S1" ] && [ -n "$S2" ] && [ -n "$S3" ] && [ -n "$S4" ] && [ -n "$S5" ] && [ -n "$S6" ]; then
+            if [ "$EARLY_UNSIGNED" = true ]; then
+              echo "early_unsigned was asked for, but the signing secrets exist: refusing to publish an unsigned build." >&2
+              exit 1
+            fi
             echo "signed=true" >> "$GITHUB_OUTPUT"
             echo "SIGNED=true" >> "$GITHUB_ENV"
             echo "ZIP_NAME=$STAGE_NAME.zip" >> "$GITHUB_ENV"
@@ -90,6 +104,17 @@ jobs:
 
       - name: Build menu bar app (scripts/build-menubar.sh)
         run: sh scripts/build-menubar.sh dist
+
+      - name: Assert both binaries are arm64
+        shell: bash
+        run: |
+          set -euo pipefail
+          menu_bin="dist/SoulsHouseMenu.app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' dist/SoulsHouseMenu.app/Contents/Info.plist)"
+          for bin in dist/companion-darwin-arm64 "$menu_bin"; do
+            archs=$(lipo -archs "$bin")
+            echo "$bin: $archs"
+            [ "$archs" = arm64 ] || { echo "expected arm64 only in $bin, got: $archs" >&2; exit 1; }
+          done
 
       - name: Stage release contents
         shell: bash
@@ -280,7 +305,9 @@ jobs:
   # stapling and verification all passed) and the build was signed.
   release:
     needs: build
-    if: needs.build.result == 'success' && needs.build.outputs.signed == 'true' && github.ref_type == 'tag'
+    if: >-
+      needs.build.result == 'success' && needs.build.outputs.signed == 'true' &&
+      github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -304,3 +331,43 @@ jobs:
             --title "$TAG" \
             --notes "Signed and notarised darwin/arm64 build. Draft: open it on a clean Mac before publishing or linking." \
             release/souls-house-companion-*-darwin-arm64.zip release/SHA256SUMS
+
+  # The early, unsigned build: only by hand, only when the signing secrets are
+  # absent (a build with them is never published unsigned), and only as a
+  # prerelease whose tag and title say so. Never the main release.
+  early-unsigned:
+    needs: build
+    if: >-
+      needs.build.result == 'success' && needs.build.outputs.signed == 'false' &&
+      github.event_name == 'workflow_dispatch' && inputs.early_unsigned
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: companion-UNSIGNED-not-for-distribution-${{ needs.build.outputs.version }}
+          path: release
+      - name: Check checksums
+        working-directory: release
+        run: sha256sum -c SHA256SUMS
+      - name: Create the early-unsigned prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tag="early-unsigned-${SHA:0:7}"
+          gh release create "$tag" --repo "$REPO" --prerelease --target "$SHA" \
+            --title "Early build, UNSIGNED ($tag)" \
+            --notes "Not signed or notarised by Apple. macOS blocks it the first time: System Settings → Privacy & Security → Open Anyway. Each update asks for Accessibility again. Replaced by the signed build once Apple approves. sha256 is in SHA256SUMS." \
+            release/*-UNSIGNED.zip release/SHA256SUMS
+          {
+            echo "### Early unsigned prerelease: $tag"
+            echo
+            echo '```'
+            cat release/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

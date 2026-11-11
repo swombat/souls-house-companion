@@ -43,7 +43,8 @@ acceptance or Windows support is claimed.
 ## Releases
 
 `.github/workflows/release.yml` runs on a pushed `v*` tag or manually
-(`workflow_dispatch`), on `macos-14` (Apple Silicon). It builds the darwin/arm64
+(`workflow_dispatch`), on `macos-15` (Apple Silicon; both binaries are checked
+to be arm64). It builds the darwin/arm64
 command-line companion (`scripts/build-macos.sh`) and the menu bar app
 (`scripts/build-menubar.sh`) and packages both as
 `souls-house-companion-<version>-darwin-arm64.zip` with a `SHA256SUMS` file
@@ -63,6 +64,12 @@ Repository secrets, all six required: `APPLE_DEVELOPER_ID_P12_BASE64`,
 - **Any missing:** the zip is built unsigned (`...-UNSIGNED.zip`) and uploaded
   only as a 14-day workflow artifact named `...UNSIGNED-not-for-distribution...`.
   No release is created and the run summary says so. Never link it publicly.
+- **Early unsigned build, on purpose:** a manual run with `early_unsigned`
+  checked, and only when the six secrets are absent (with them the run fails
+  instead), also publishes that unsigned zip as a **prerelease** tagged
+  `early-unsigned-<sha>`, titled UNSIGNED. That is what the house's "Download it
+  early" button may link, with the sha256 from `SHA256SUMS` shown beside it. It is
+  never the main release.
 
-The house links a download only after a signed, notarised build has been opened
-on a clean Mac. Publishing the draft release is a separate, manual step.
+The house's main download button links a build only after a signed, notarised
+build has been opened on a clean Mac. Publishing the draft release is a separate, manual step.
