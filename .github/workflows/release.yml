@@ -360,8 +360,12 @@ jobs:
           # Full sha, and never reuse a tag: --target is ignored for an existing
           # tag, which would attach these binaries to another commit's source.
           tag="early-unsigned-$SHA"
-          if gh api "repos/$REPO/git/ref/tags/$tag" >/dev/null 2>&1; then
-            echo "tag $tag already exists: refusing to attach a new build to it" >&2
+          # Fail closed: only a real 404 means the tag is absent. Any other answer
+          # (exists, auth, network, server error) stops the run.
+          status=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/git/ref/tags/$tag")
+          if [ "$status" != 404 ]; then
+            echo "tag check for $tag answered HTTP $status (want 404, absent): refusing to publish" >&2
             exit 1
           fi
           gh release create "$tag" --repo "$REPO" --prerelease --target "$SHA" \
