@@ -1,0 +1,306 @@
+name: Companion release
+
+# Builds the darwin/arm64 command-line companion and the menu bar app, and
+# packages them into one zip. The build is signed (Developer ID, hardened
+# runtime) and notarised only when ALL six Apple secrets are present. Without
+# them the zip is produced as an UNSIGNED workflow artifact and no release is
+# created. If the secrets ARE present, any signing, notarisation, stapling or
+# verification failure fails the job: there is no fallback to the unsigned path.
+# See "Releases" in README.md.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 60
+    outputs:
+      signed: ${{ steps.secrets.outputs.signed }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.2'
+          cache: true
+
+      - name: Compute version and file names
+        id: version
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = tag ]; then
+            version="$REF_NAME"
+          else
+            version="dev-${SHA:0:7}"
+          fi
+          # The version ends up in file names and shell commands: refuse anything odd.
+          printf '%s' "$version" | grep -Eq '^[A-Za-z0-9._-]+$' || { echo "unsafe version: $version" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "STAGE_NAME=souls-house-companion-$version-darwin-arm64" >> "$GITHUB_ENV"
+
+      - name: Check signing secrets
+        id: secrets
+        shell: bash
+        env:
+          S1: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          S2: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          S3: ${{ secrets.APPLE_TEAM_ID }}
+          S4: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          S5: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          S6: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -n "$S1" ] && [ -n "$S2" ] && [ -n "$S3" ] && [ -n "$S4" ] && [ -n "$S5" ] && [ -n "$S6" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "SIGNED=true" >> "$GITHUB_ENV"
+            echo "ZIP_NAME=$STAGE_NAME.zip" >> "$GITHUB_ENV"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "SIGNED=false" >> "$GITHUB_ENV"
+            # The file name itself says unsigned, so it cannot be mistaken for a release.
+            echo "ZIP_NAME=$STAGE_NAME-UNSIGNED.zip" >> "$GITHUB_ENV"
+          fi
+
+      - name: Ensure sha256sum exists (scripts/build-macos.sh uses it)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v sha256sum >/dev/null 2>&1; then
+            mkdir -p "$RUNNER_TEMP/shim"
+            printf '#!/bin/sh\nexec shasum -a 256 "$@"\n' > "$RUNNER_TEMP/shim/sha256sum"
+            chmod 755 "$RUNNER_TEMP/shim/sha256sum"
+            echo "$RUNNER_TEMP/shim" >> "$GITHUB_PATH"
+          fi
+
+      - name: Build command-line companion (scripts/build-macos.sh)
+        run: sh scripts/build-macos.sh dist
+
+      - name: Build menu bar app (scripts/build-menubar.sh)
+        run: sh scripts/build-menubar.sh dist
+
+      - name: Stage release contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="stage/$STAGE_NAME"
+          mkdir -p "$stage"
+          cp dist/companion-darwin-arm64 "$stage/souls-house-companion"
+          cp scripts/install-macos.sh "$stage/install.sh"
+          cp scripts/install-menubar.sh "$stage/install-menubar.sh"
+          cp docs/macos.md "$stage/macos.md"
+          chmod 755 "$stage/souls-house-companion" "$stage/install.sh" "$stage/install-menubar.sh"
+          ditto dist/SoulsHouseMenu.app "$stage/SoulsHouseMenu.app"
+
+      - name: Import Developer ID certificate into a temporary keychain
+        if: steps.secrets.outputs.signed == 'true'
+        shell: bash
+        env:
+          P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          kc="$RUNNER_TEMP/companion-signing.keychain-db"
+          kc_pw=$(openssl rand -hex 24)
+          echo "SIGNING_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+          p12="$RUNNER_TEMP/developer-id.p12"
+          printf '%s' "$P12_BASE64" | base64 --decode > "$p12"
+          security create-keychain -p "$kc_pw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kc_pw" "$kc"
+          security import "$p12" -P "$P12_PASSWORD" -f pkcs12 -k "$kc" -T /usr/bin/codesign >/dev/null
+          rm -f "$p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kc_pw" "$kc" >/dev/null
+          # Put it first in the user search list so codesign finds it.
+          existing=$(security list-keychains -d user | tr -d '"')
+          # shellcheck disable=SC2086
+          security list-keychains -d user -s "$kc" $existing
+          identity=$(security find-identity -v -p codesigning "$kc" | grep 'Developer ID Application' | grep -F "($TEAM_ID)" | head -n1 | awk '{print $2}')
+          if [ -z "$identity" ]; then
+            echo "No 'Developer ID Application' identity for the given team in the imported p12." >&2
+            exit 1
+          fi
+          echo "SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Sign with Developer ID (hardened runtime, timestamp)
+        if: steps.secrets.outputs.signed == 'true'
+        shell: bash
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          stage="stage/$STAGE_NAME"
+          # Same identifier as scripts/sign-macos.sh (not used here: it makes a
+          # self-signed local identity). The app keeps house.souls.menu from its Info.plist.
+          codesign --force --timestamp --options runtime --keychain "$SIGNING_KEYCHAIN" \
+            --sign "$SIGNING_IDENTITY" --identifier house.souls.companion "$stage/souls-house-companion"
+          codesign --force --timestamp --options runtime --keychain "$SIGNING_KEYCHAIN" \
+            --sign "$SIGNING_IDENTITY" "$stage/SoulsHouseMenu.app"
+          codesign --verify --strict --verbose=2 "$stage/souls-house-companion"
+          codesign --verify --strict --deep --verbose=2 "$stage/SoulsHouseMenu.app"
+          for t in "$stage/souls-house-companion" "$stage/SoulsHouseMenu.app"; do
+            codesign -dvv "$t" 2>&1 | grep -F "TeamIdentifier=$TEAM_ID" >/dev/null || { echo "unexpected team on $t" >&2; exit 1; }
+          done
+
+      - name: Notarise and staple
+        if: steps.secrets.outputs.signed == 'true'
+        shell: bash
+        env:
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          stage="stage/$STAGE_NAME"
+          key="$RUNNER_TEMP/notary-key.p8"
+          printf '%s' "$NOTARY_KEY_P8_BASE64" | base64 --decode > "$key"
+          # notarytool takes a zip/dmg/pkg, so submit one zip holding both signed items.
+          rm -rf notary && mkdir notary
+          cp "$stage/souls-house-companion" notary/
+          ditto "$stage/SoulsHouseMenu.app" notary/SoulsHouseMenu.app
+          ditto -c -k --keepParent notary "$RUNNER_TEMP/notarise.zip"
+          rm -rf notary
+          # A non-zero exit here is tolerated only so the log can be fetched; the
+          # status check below fails the job unless Apple says Accepted.
+          xcrun notarytool submit "$RUNNER_TEMP/notarise.zip" \
+            --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+            --wait --timeout 30m --output-format json > "$RUNNER_TEMP/notary.json" || true
+          rm -f "$RUNNER_TEMP/notarise.zip"
+          status=$(jq -r '.status // "unknown"' "$RUNNER_TEMP/notary.json" || echo unknown)
+          id=$(jq -r '.id // empty' "$RUNNER_TEMP/notary.json" || true)
+          echo "notarisation status: $status"
+          if [ "$status" != "Accepted" ]; then
+            if [ -n "$id" ]; then
+              xcrun notarytool log "$id" --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" || true
+            fi
+            rm -f "$key"
+            echo "Notarisation did not succeed; failing the job (no unsigned fallback)." >&2
+            exit 1
+          fi
+          rm -f "$key"
+          # Only the .app can be stapled. A bare command-line binary has no place to
+          # hold a ticket; Gatekeeper finds its notarisation online by code hash.
+          xcrun stapler staple "$stage/SoulsHouseMenu.app"
+          xcrun stapler validate "$stage/SoulsHouseMenu.app"
+
+      - name: Package zip and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          ditto -c -k --keepParent "stage/$STAGE_NAME" "release/$ZIP_NAME"
+          (cd release && shasum -a 256 "$ZIP_NAME" > SHA256SUMS)
+          cat release/SHA256SUMS
+
+      - name: Verify the packaged zip (signed builds)
+        if: steps.secrets.outputs.signed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf verify && mkdir verify
+          ditto -x -k "release/$ZIP_NAME" verify
+          d="verify/$STAGE_NAME"
+          codesign --verify --strict --verbose=2 "$d/souls-house-companion"
+          codesign --verify --strict --deep --verbose=2 "$d/SoulsHouseMenu.app"
+          xcrun stapler validate "$d/SoulsHouseMenu.app"
+          # Gatekeeper assessment applies to the app. spctl rejects a bare Mach-O
+          # ("does not seem to be an app"), so the CLI is covered by codesign above.
+          spctl -a -vv -t exec "$d/SoulsHouseMenu.app"
+          rm -rf verify
+
+      - name: Summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$SIGNED" = true ]; then
+            {
+              echo "### Signed and notarised build: $VERSION"
+              echo
+              echo "Developer ID signed, notarised, app stapled, verified. A pushed tag gets a DRAFT release; manual runs only produce a workflow artifact."
+              echo "Do not link it publicly until it has been opened on a clean Mac."
+              echo
+              echo '```'
+              cat release/SHA256SUMS
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### UNSIGNED build: $VERSION"
+              echo
+              echo "**This build is unsigned and not notarised (Apple signing secrets are missing). It must not be linked publicly or distributed. No release was created.**"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload signed build artifact
+        if: steps.secrets.outputs.signed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: companion-signed-${{ steps.version.outputs.version }}
+          path: |
+            release/${{ env.ZIP_NAME }}
+            release/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload UNSIGNED build artifact
+        if: steps.secrets.outputs.signed != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: companion-UNSIGNED-not-for-distribution-${{ steps.version.outputs.version }}
+          path: |
+            release/${{ env.ZIP_NAME }}
+            release/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Delete temporary keychain
+        if: always() && steps.secrets.outputs.signed == 'true'
+        shell: bash
+        run: |
+          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then
+            security delete-keychain "$SIGNING_KEYCHAIN" || true
+          fi
+          rm -f "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP/notary-key.p8" "$RUNNER_TEMP/notarise.zip"
+
+  # Separate job so that only this one holds contents: write. It runs only for a
+  # pushed tag, only when the build job succeeded (so signing, notarisation,
+  # stapling and verification all passed) and the build was signed.
+  release:
+    needs: build
+    if: needs.build.result == 'success' && needs.build.outputs.signed == 'true' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: companion-signed-${{ needs.build.outputs.version }}
+          path: release
+      - name: Check checksums
+        working-directory: release
+        run: sha256sum -c SHA256SUMS
+      - name: Create DRAFT release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" --repo "$REPO" --draft --verify-tag \
+            --title "$TAG" \
+            --notes "Signed and notarised darwin/arm64 build. Draft: open it on a clean Mac before publishing or linking." \
+            release/souls-house-companion-*-darwin-arm64.zip release/SHA256SUMS
