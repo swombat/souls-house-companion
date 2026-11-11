@@ -26,11 +26,15 @@ for arch in amd64 arm64; do
   mkdir "$stage/$name"
   CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
     -ldflags="-s -w -X main.version=$version" -o "$stage/$name/souls-house-companion" ./cmd/companion
-  got=$(elf_machine "$stage/$name/souls-house-companion")
-  [ "$got" = "$want" ] || { echo "linux/$arch: ELF machine $got, want $want" >&2; exit 1; }
+  CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
+    -ldflags="-s -w" -o "$stage/$name/souls-house-tray" ./cmd/tray
+  for bin in souls-house-companion souls-house-tray; do
+    got=$(elf_machine "$stage/$name/$bin")
+    [ "$got" = "$want" ] || { echo "linux/$arch $bin: ELF machine $got, want $want" >&2; exit 1; }
+  done
   cp docs/linux.md "$stage/$name/README.md"
   cp LICENSE "$stage/$name/LICENSE"
-  chmod 755 "$stage/$name/souls-house-companion"
+  chmod 755 "$stage/$name/souls-house-companion" "$stage/$name/souls-house-tray"
   chmod 644 "$stage/$name/README.md" "$stage/$name/LICENSE"
   tar -czf "$out/$name.tar.gz" --owner=0 --group=0 --numeric-owner -C "$stage" "$name"
   rm -rf "$stage"
