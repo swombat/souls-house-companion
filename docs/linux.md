@@ -26,6 +26,17 @@ against `SHA256SUMS` in the release.
    exact commands, including the folders you are granting.
 3. Once enrolled, the computer appears under Settings → Computers in the house.
 
+## The tray icon
+
+`souls-house-tray` puts the souls.house house mark in your desktop's tray
+(any bar that hosts StatusNotifierItem icons: Omarchy's, KDE's, Waybar's tray
+module). The circle is filled while the companion runs, a coral ring while it
+is paused, and grey when the companion isn't answering. Its menu shows the
+status and pauses or resumes the companion; it has no other authority.
+Keep it next to `souls-house-companion` and run `souls-house-tray install`
+once: that adds a user unit which starts it with your graphical session.
+`souls-house-tray uninstall` removes it.
+
 `souls-house-companion status` shows what is enrolled and whether it is
 paused. `souls-house-companion pause` stops the service at once and refuses
 new work until you resume it.
