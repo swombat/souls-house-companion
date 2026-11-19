@@ -92,6 +92,7 @@ final class Menu: NSObject, NSMenuDelegate {
     /// True from the end of a run-commands change until a status read made
     /// after it lands; until then the old snapshot drives nothing.
     var awaitingRead = false
+    var pairWindow: PairWindow?
 
     override init() {
         super.init()
@@ -157,7 +158,7 @@ final class Menu: NSObject, NSMenuDelegate {
         }
         if !snapshot.companionReachable && notPaired() {
             menu.addItem(disabled("This Mac isn't paired yet"))
-            menu.addItem(action("How to pair it…", #selector(openPairing)))
+            menu.addItem(action("Pair this Mac…", #selector(pairThisMac)))
         } else if !snapshot.companionReachable {
             menu.addItem(disabled("Companion not answering"))
         }
@@ -251,7 +252,15 @@ final class Menu: NSObject, NSMenuDelegate {
         return !FileManager.default.fileExists(atPath: state)
     }
 
-    @objc func openPairing() { NSWorkspace.shared.open(pairingPage) }
+    @objc func pairThisMac() {
+        if pairWindow == nil {
+            pairWindow = PairWindow(companion: companion) { [weak self] in
+                self?.build()
+                self?.refresh()
+            }
+        }
+        pairWindow?.show()
+    }
     @objc func toggleLoginItem() {
         installNote = LoginItem.set(LoginItem.current != .on)
         build()
@@ -359,8 +368,6 @@ final class Menu: NSObject, NSMenuDelegate {
     @objc func openAccessibility() { NSWorkspace.shared.open(accessibilityPane) }
     @objc func quit() { NSApp.terminate(nil) }
 }
-
-let pairingPage = URL(string: "https://souls.house/companion#enrol-heading")!
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
