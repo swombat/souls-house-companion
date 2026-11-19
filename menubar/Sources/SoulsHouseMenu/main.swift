@@ -7,6 +7,8 @@ import AppKit
 import MenuCore
 
 let companion = (NSHomeDirectory() as NSString).appendingPathComponent(".local/bin/souls-house-companion")
+// The Computers page on souls.house names this item word for word.
+let runCommandsTitle = "Let residents run commands on this Mac"
 let accessibilityPane = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
 
 let clock: DateFormatter = {
@@ -78,6 +80,7 @@ final class Menu: NSObject, NSMenuDelegate {
     var timer: Timer?
     var snapshot = Snapshot()
     var failedAction: String?
+    var lifecycleNote: String?
     var inProgress: String?
 
     override init() {
@@ -161,6 +164,21 @@ final class Menu: NSObject, NSMenuDelegate {
             menu.addItem(action("Open Accessibility settings…", #selector(openAccessibility)))
         }
         menu.addItem(.separator())
+        // Run commands: the Mac's own half of the permission. The house's
+        // Run commands switch is per resident; this is the local opt-in that
+        // the companion checks before running anything.
+        if let accepted = snapshot.executeAccepted {
+            let item = NSMenuItem(title: runCommandsTitle,
+                                  action: inProgress == nil ? #selector(toggleRunCommands) : nil, keyEquivalent: "")
+            item.target = self
+            item.state = accepted ? .on : .off
+            item.isEnabled = inProgress == nil
+            menu.addItem(item)
+        }
+        if let lifecycleNote {
+            menu.addItem(disabled(lifecycleNote))
+        }
+        menu.addItem(.separator())
         if inProgress == nil, let paused = snapshot.paused {
             menu.addItem(action(paused ? "Resume companion" : "Pause companion", #selector(togglePause)))
         }
@@ -208,6 +226,46 @@ final class Menu: NSObject, NSMenuDelegate {
         change(resume ? "Resume companion" : "Pause companion", [resume ? "resume" : "pause"])
     }
     @objc func requestAccessibility() { change("Ask for Accessibility", ["accessibility", "--request"]) }
+
+    @objc func toggleRunCommands() {
+        let allow = snapshot.executeAccepted != true
+        if allow && !confirmRunCommands() { return }
+        inProgress = allow ? "Allowing commands" : "Turning commands off"
+        failedAction = nil
+        lifecycleNote = nil
+        build()
+        var outcome = LifecycleChange.couldNotRead
+        coordinator.change({
+            outcome = setExecuteLifecycle(allow: allow) { runCLI(companion, $0, timeout: 40) }
+            return outcome == .done
+        }) { _ in
+            DispatchQueue.main.async {
+                if !self.coordinator.busy { self.inProgress = nil }
+                self.lifecycleNote = lifecycleMessage(outcome, allow: allow)
+                self.build()
+                self.refresh()
+            }
+        }
+    }
+
+    /// Asked here, at the Mac, every time it is turned on. Nothing a
+    /// resident can send reaches this dialog.
+    func confirmRunCommands() -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Let residents run commands on this Mac?"
+        alert.informativeText = """
+            Residents you have given Run commands on your Computers page will be able to run \
+            commands on this Mac as you, with your user's access.
+
+            macOS can't guarantee that every process a command starts is stopped afterwards. \
+            You can turn this off here at any time.
+            """
+        alert.addButton(withTitle: "Allow commands")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     @objc func openAccessibility() { NSWorkspace.shared.open(accessibilityPane) }
     @objc func quit() { NSApp.terminate(nil) }
 }

@@ -93,7 +93,17 @@ are detection receipts, never proof of containment. Never copy candidate
 process names into audit logs.
 
 Without this exact per-install local opt-in, execute is refused before input
-download; read/write remain available:
+download; read/write remain available.
+
+The menu bar app's **Let residents run commands on this Mac** item does this
+without Terminal. Turning it on asks once, at the Mac, what the contract
+means, then pauses the companion, accepts the contract the companion itself
+reports, reads status back and resumes. Turning it off revokes the same way,
+and if the revoke can't be confirmed it leaves the companion paused rather
+than resuming into the old permission. A pause that was already in place is
+kept. The house learns the result only as a display flag
+(`execute_lifecycle_accepted` on the ceiling report) so the Computers page can
+say when it is off; that flag grants nothing. From Terminal:
 
 ```
 souls-house-companion pause

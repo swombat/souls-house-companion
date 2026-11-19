@@ -10,6 +10,9 @@ public struct Snapshot: Equatable {
     public var desktop: DesktopState = .unknown
     public var paused: Bool? = nil
     public var trusted: Bool? = nil
+    /// Whether this Mac lets residents run commands (the local execute
+    /// lifecycle contract is accepted). Nil when status can't say.
+    public var executeAccepted: Bool? = nil
     public var lastAction: String? = nil
     public var companionReachable = false
 
@@ -39,6 +42,10 @@ public func makeSnapshot(status: CLIResult, desktop: CLIResult, clock: DateForma
         s.companionReachable = true
         s.paused = st["paused"] as? Bool
         if let ax = st["accessibility"] as? [String: Any] { s.trusted = ax["trusted"] as? Bool }
+        if let contract = st["execute_lifecycle"] as? String, !contract.isEmpty,
+           let accepted = st["accepted_execute_lifecycle"] as? String {
+            s.executeAccepted = accepted == contract
+        }
     }
     guard desktop.succeeded, let d = object(desktop.output), let on = d["on"] as? Bool else {
         return s
