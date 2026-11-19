@@ -83,7 +83,24 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 	if strings.Contains(string(raw), "resX") || strings.Contains(string(raw), "outsider-only-key") {
 		t.Fatalf("report disclosed a resident not enrolled on this device: %s", raw)
 	}
-	if strings.Contains(frame.Data, "execute") || strings.Contains(frame.Data, "desktop") {
+	// Per resident, only volume keys and access. The one device-level extra
+	// is execute_lifecycle_accepted, and only on macOS (see below).
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(frame.Data), &keys); err != nil {
+		t.Fatal(err)
+	}
+	for k := range keys {
+		switch k {
+		case "action", "connection_epoch", "ceiling":
+		case "execute_lifecycle_accepted":
+			if executeLifecycleReport("") == nil {
+				t.Fatalf("opt-in reported on a platform without one: %s", frame.Data)
+			}
+		default:
+			t.Fatalf("report carries more than it should: %s", frame.Data)
+		}
+	}
+	if strings.Contains(string(keys["ceiling"]), "execute") || strings.Contains(frame.Data, "desktop") {
 		t.Fatalf("report carries more than volume keys and access: %s", frame.Data)
 	}
 	var data struct {
@@ -117,17 +134,51 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 }
 
 func TestCeilingReportNeedsAnEpochAndAValidCeiling(t *testing.T) {
-	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "", policy.Policy{}, policy.Policy{}); err == nil {
+	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "", policy.Policy{}, policy.Policy{}, nil); err == nil {
 		t.Fatal("reported without an epoch")
 	}
 	bad := policy.Policy{Residents: []policy.Resident{{ID: "r", Volumes: []policy.Grant{{Volume: "v", Access: "admin"}}}}}
-	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "epoch", bad, policy.Policy{}); err == nil {
+	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "epoch", bad, policy.Policy{}, nil); err == nil {
 		t.Fatal("reported an invalid ceiling")
 	}
-	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "epoch", policy.Policy{}, bad); err == nil {
+	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "epoch", policy.Policy{}, bad, nil); err == nil {
 		t.Fatal("reported against an invalid enrolled policy")
 	}
-	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "epoch", policy.Policy{}, policy.Policy{}); err != nil {
+	if _, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "epoch", policy.Policy{}, policy.Policy{}, nil); err != nil {
 		t.Fatalf("an empty ceiling must still be reportable: %v", err)
+	}
+}
+
+// The Mac's run-commands opt-in rides on the same report as one literal
+// boolean. Not knowing (Linux, or nothing passed) leaves the field out
+// entirely, so the house can never read "unknown" as false.
+func TestCeilingReportCarriesTheOptInOnlyWhenKnown(t *testing.T) {
+	yes, no := true, false
+	for _, tc := range []struct {
+		accepted *bool
+		want     string
+	}{{&yes, "true"}, {&no, "false"}, {nil, ""}} {
+		raw, err := ceilingReportFrame(`{"channel":"CompanionChannel"}`, "epoch", policy.Policy{}, policy.Policy{}, tc.accepted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var frame struct{ Data string }
+		if err := json.Unmarshal(raw, &frame); err != nil {
+			t.Fatal(err)
+		}
+		var data map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(frame.Data), &data); err != nil {
+			t.Fatal(err)
+		}
+		got, present := data["execute_lifecycle_accepted"]
+		if tc.want == "" {
+			if present {
+				t.Fatalf("unknown opt-in reported: %s", frame.Data)
+			}
+			continue
+		}
+		if string(got) != tc.want {
+			t.Fatalf("opt-in %s reported as %s", tc.want, got)
+		}
 	}
 }

@@ -7,6 +7,8 @@ import AppKit
 import MenuCore
 
 let companion = (NSHomeDirectory() as NSString).appendingPathComponent(".local/bin/souls-house-companion")
+// The Computers page on souls.house names this item word for word.
+let holdKey = "runCommandsHold"
 let accessibilityPane = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
 
 let clock: DateFormatter = {
@@ -78,7 +80,15 @@ final class Menu: NSObject, NSMenuDelegate {
     var timer: Timer?
     var snapshot = Snapshot()
     var failedAction: String?
+    var lifecycleNote: String?
     var inProgress: String?
+    /// An unresolved run-commands change, kept across restarts of the menu.
+    var hold: LifecycleHold? = UserDefaults.standard.string(forKey: holdKey).flatMap(LifecycleHold.init(stored:)) {
+        didSet { UserDefaults.standard.set(hold?.stored, forKey: holdKey) }
+    }
+    /// True from the end of a run-commands change until a status read made
+    /// after it lands; until then the old snapshot drives nothing.
+    var awaitingRead = false
 
     override init() {
         super.init()
@@ -101,6 +111,7 @@ final class Menu: NSObject, NSMenuDelegate {
                 self.refreshing = false
                 if self.coordinator.isCurrent(generation) {
                     self.snapshot = next
+                    self.awaitingRead = false
                     self.build()
                 }
             }
@@ -161,8 +172,32 @@ final class Menu: NSObject, NSMenuDelegate {
             menu.addItem(action("Open Accessibility settings…", #selector(openAccessibility)))
         }
         menu.addItem(.separator())
-        if inProgress == nil, let paused = snapshot.paused {
-            menu.addItem(action(paused ? "Resume companion" : "Pause companion", #selector(togglePause)))
+        // Run commands: the Mac's own half of the permission. The house's
+        // Run commands switch is per resident; this is the local opt-in that
+        // the companion checks before running anything. What is offered is
+        // decided in MenuCore (lifecycleMenuItems) so it can be tested.
+        let items = lifecycleMenuItems(executeAccepted: snapshot.executeAccepted, paused: snapshot.paused,
+                                       busy: inProgress != nil, awaitingRead: awaitingRead,
+                                       hold: hold, note: lifecycleNote)
+        for entry in items {
+            switch entry {
+            case let .runCommands(checked, enabled):
+                let i = NSMenuItem(title: entry.title, action: enabled ? #selector(toggleRunCommands) : nil,
+                                   keyEquivalent: "")
+                i.target = self
+                i.state = checked ? .on : .off
+                i.isEnabled = enabled
+                menu.addItem(i)
+            case .note:
+                menu.addItem(disabled(entry.title))
+            case .tryTurnOffAgain, .turnOffInstead:
+                menu.addItem(action(entry.title, #selector(resolveByTurningOff)))
+            case .checkAgain:
+                menu.addItem(action(entry.title, #selector(resolveByChecking)))
+            case .pauseOrResume:
+                menu.addItem(.separator())
+                menu.addItem(action(entry.title, #selector(togglePause)))
+            }
         }
         if let last = snapshot.lastAction {
             menu.addItem(.separator())
@@ -204,10 +239,72 @@ final class Menu: NSObject, NSMenuDelegate {
     @objc func onUntilOff() { change("Turn on until turned off", ["desktop", "on", "--until-off"]) }
     @objc func turnOff() { change("Turn off", ["desktop", "off"]) }
     @objc func togglePause() {
+        guard hold == nil else { return }
         let resume = snapshot.paused == true
         change(resume ? "Resume companion" : "Pause companion", [resume ? "resume" : "pause"])
     }
     @objc func requestAccessibility() { change("Ask for Accessibility", ["accessibility", "--request"]) }
+
+    @objc func toggleRunCommands() {
+        guard hold == nil else { return }
+        let allow = snapshot.executeAccepted != true
+        if allow && !confirmRunCommands() { return }
+        runLifecycle(allow ? "Allowing commands" : "Turning commands off", allow: allow) { run in
+            setExecuteLifecycle(allow: allow, run: run)
+        }
+    }
+
+    @objc func resolveByTurningOff() {
+        guard let current = hold else { return }
+        runLifecycle("Turning commands off", allow: false) { run in resolveHold(current, turnOff: true, run: run) }
+    }
+
+    @objc func resolveByChecking() {
+        guard let current = hold else { return }
+        runLifecycle("Checking", allow: true) { run in resolveHold(current, turnOff: false, run: run) }
+    }
+
+    /// Runs one run-commands change, then waits for a fresh status read
+    /// before the switch or the pause item can be used again.
+    func runLifecycle(_ label: String, allow: Bool, _ body: @escaping (([String]) -> CLIResult) -> LifecycleChange) {
+        inProgress = label
+        failedAction = nil
+        lifecycleNote = nil
+        build()
+        var outcome = LifecycleChange.couldNotRead
+        coordinator.change({
+            outcome = body { runCLI(companion, $0, timeout: 40) }
+            return outcome == .done
+        }) { _ in
+            DispatchQueue.main.async {
+                if !self.coordinator.busy { self.inProgress = nil }
+                self.hold = outcome.hold
+                self.lifecycleNote = lifecycleMessage(outcome, allow: allow)
+                self.awaitingRead = true
+                self.build()
+                self.refresh()
+            }
+        }
+    }
+
+    /// Asked here, at the Mac, every time it is turned on. Nothing a
+    /// resident can send reaches this dialog.
+    func confirmRunCommands() -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Let residents run commands on this Mac?"
+        alert.informativeText = """
+            Residents you have given Run commands on your Computers page will be able to run \
+            commands on this Mac as you, with your user's access.
+
+            macOS can't guarantee that every process a command starts is stopped afterwards. \
+            You can turn this off here at any time.
+            """
+        alert.addButton(withTitle: "Allow commands")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     @objc func openAccessibility() { NSWorkspace.shared.open(accessibilityPane) }
     @objc func quit() { NSApp.terminate(nil) }
 }

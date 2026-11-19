@@ -311,7 +311,11 @@ func (c *Client) runOnce(ctx context.Context, state *State, shutdownGrace time.D
 			// owner page can offer folder changes. The report names volume
 			// keys and access only, is tied to this connection's epoch, and
 			// authorises nothing: every request is still checked here.
-			if frame, err := ceilingReportFrame(identifier, epoch, connectionState.Ceiling, request.Policy); err != nil ||
+			// The accepted contract is the one this connection started with;
+			// accepting or revoking needs the state lock, so it always happens
+			// across a pause and a new connection, which reports again.
+			if frame, err := ceilingReportFrame(identifier, epoch, connectionState.Ceiling, request.Policy,
+				executeLifecycleReport(connectionState.ExecuteLifecycle)); err != nil ||
 				conn.Write(ctx, websocket.MessageText, frame) != nil {
 				return ErrTransport
 			}
