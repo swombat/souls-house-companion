@@ -320,7 +320,8 @@ func (c *Client) finishPair(ctx context.Context, req PairRequest, requestID stri
 	}
 	if json.Unmarshal(data, &approved) != nil || approved.Status != "approved" ||
 		!strings.HasPrefix(approved.Token, "shce_") || len(approved.Token) > 256 ||
-		approved.DeviceRequestID != requestID {
+		approved.DeviceRequestID != requestID || len(approved.ResidentIDs) == 0 {
+		// An approval naming nobody would enroll a device no resident can use.
 		return zero, ErrTransport
 	}
 	ceiling := PairCeiling(req.Offers, approved.ResidentIDs)
