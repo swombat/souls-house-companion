@@ -49,6 +49,14 @@ public enum LifecycleHold: Equatable {
         }
     }
 
+    /// The outcome that leaves this hold exactly as it is.
+    var unchanged: LifecycleChange {
+        switch self {
+        case let .revokeUnconfirmed(owed): return .revokeUnconfirmed(resumeOwed: owed)
+        case let .acceptUnverified(owed): return .acceptUnverified(resumeOwed: owed)
+        }
+    }
+
     /// A string form for keeping the hold across a restart of the menu.
     public var stored: String {
         switch self {
@@ -128,10 +136,18 @@ public func checkAcceptAgain(resumeOwed: Bool, run: ([String]) -> CLIResult) -> 
     return finish(confirmed: accepted == contract, resume: resumeOwed, run: run)
 }
 
-/// Resolves a hold the way the owner chose from the menu.
+/// Resolves a hold the way the owner chose from the menu. A hold ends only on
+/// an outcome that read the permission back: a confirmed revoke, or a
+/// readable check. Anything inconclusive (status unreadable before the retry,
+/// a pause that fails) keeps the hold it started from, so a later healthy
+/// refresh can never turn it into a plain Resume over the old permission.
 public func resolveHold(_ hold: LifecycleHold, turnOff: Bool, run: ([String]) -> CLIResult) -> LifecycleChange {
-    if turnOff { return setExecuteLifecycle(allow: false, resumeOwed: hold.resumeOwed, run: run) }
-    return checkAcceptAgain(resumeOwed: hold.resumeOwed, run: run)
+    let outcome = turnOff ? setExecuteLifecycle(allow: false, resumeOwed: hold.resumeOwed, run: run)
+                          : checkAcceptAgain(resumeOwed: hold.resumeOwed, run: run)
+    switch outcome {
+    case .couldNotRead, .couldNotPause: return hold.unchanged
+    default: return outcome
+    }
 }
 
 private func readAccepted(_ run: ([String]) -> CLIResult) -> String? {

@@ -87,7 +87,7 @@ final class MenuCoreTests: XCTestCase {
         var paused: Bool?
         var accepted = ""
         let contract = "darwin-process-group-preview-v1"
-        var failPause = false, failChange = false, failResume = false, failStatusAfterChange = false
+        var failPause = false, failChange = false, failResume = false, failStatusAfterChange = false, failStatus = false
         var calls: [[String]] = []
         private var changed = false
 
@@ -102,7 +102,7 @@ final class MenuCoreTests: XCTestCase {
             calls.append(args)
             switch args.first {
             case "status":
-                if changed && failStatusAfterChange { return result(false) }
+                if failStatus || (changed && failStatusAfterChange) { return result(false) }
                 var st: [String: Any] = ["execute_lifecycle": contract, "accepted_execute_lifecycle": accepted]
                 if let paused { st["paused"] = paused }
                 return result(true, st)
@@ -242,6 +242,42 @@ final class MenuCoreTests: XCTestCase {
         let g = FakeCompanion(paused: true, accepted: "darwin-process-group-preview-v1")
         XCTAssertEqual(resolveHold(.revokeUnconfirmed(resumeOwed: false), turnOff: true, run: g.run), .done)
         XCTAssertEqual(g.paused, true)
+    }
+
+    func testAnInconclusiveRetryKeepsTheHoldThroughALaterHealthyRefresh() {
+        // The first revoke failed: paused by the menu, permission still on.
+        let f = FakeCompanion(paused: true, accepted: "darwin-process-group-preview-v1")
+        var hold: LifecycleHold? = .revokeUnconfirmed(resumeOwed: true)
+        // "Try again" cannot even read its opening status.
+        f.failStatus = true
+        hold = resolveHold(hold!, turnOff: true, run: f.run).hold
+        XCTAssertEqual(hold, .revokeUnconfirmed(resumeOwed: true))
+        XCTAssertFalse(f.calls.contains { $0.first != "status" }) // no pause, revoke or resume attempted
+        // A failing pause is just as inconclusive.
+        f.failStatus = false; f.paused = false; f.failPause = true
+        hold = resolveHold(hold!, turnOff: true, run: f.run).hold
+        XCTAssertEqual(hold, .revokeUnconfirmed(resumeOwed: true))
+        f.failPause = false; f.paused = true
+        // Status is healthy again and still shows the old permission: the menu
+        // offers only the retry, never a plain Resume.
+        let items = lifecycleMenuItems(executeAccepted: true, paused: true, busy: false, awaitingRead: false,
+                                       hold: hold, note: nil)
+        XCTAssertEqual(items, [.note(LifecycleHold.revokeUnconfirmed(resumeOwed: true).message), .tryTurnOffAgain])
+        XCTAssertEqual(f.accepted, f.contract)
+        // Only a confirmed revoke ends the hold, and then it resumes.
+        let outcome = resolveHold(hold!, turnOff: true, run: f.run)
+        XCTAssertEqual(outcome, .done)
+        XCTAssertNil(outcome.hold)
+        XCTAssertEqual(f.accepted, "")
+        XCTAssertEqual(f.paused, false)
+        // The same holds for "Turn commands off instead" and "Check again".
+        let g = FakeCompanion(paused: true)
+        g.failStatus = true
+        XCTAssertEqual(resolveHold(.acceptUnverified(resumeOwed: true), turnOff: true, run: g.run),
+                       .acceptUnverified(resumeOwed: true))
+        XCTAssertEqual(resolveHold(.acceptUnverified(resumeOwed: false), turnOff: false, run: g.run),
+                       .acceptUnverified(resumeOwed: false))
+        XCTAssertFalse(g.calls.contains(["resume"]))
     }
 
     func testCheckAgainResumesOnlyOnAReadableStatus() {

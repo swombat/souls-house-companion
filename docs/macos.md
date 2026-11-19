@@ -103,7 +103,9 @@ Nothing resumes until a readable status says what the permission now is: if
 the revoke can't be confirmed, or status can't be read after an accept, the
 companion stays paused, the menu says which, and it offers only the actions
 that settle it ("Try again to turn commands off", or "Check again" / "Turn
-commands off instead"), never a plain Resume. That held state survives a
+commands off instead"), never a plain Resume. A retry that is itself
+inconclusive (status unreadable, or the pause fails) keeps the hold; only a
+confirmed revoke or a readable check ends it. That held state survives a
 restart of the menu. A pause that was already in place is kept. The house
 learns the result only as a display flag
 (`execute_lifecycle_accepted` on the ceiling report) so the Computers page can
