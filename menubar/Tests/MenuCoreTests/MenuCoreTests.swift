@@ -147,13 +147,13 @@ final class MenuCoreTests: XCTestCase {
     func testRevokeThatCannotBeConfirmedDoesNotResume() {
         let f = FakeCompanion(paused: false, accepted: "darwin-process-group-preview-v1")
         f.failChange = true
-        XCTAssertEqual(setExecuteLifecycle(allow: false, run: f.run), .revokeUnconfirmedPaused)
+        XCTAssertEqual(setExecuteLifecycle(allow: false, run: f.run), .revokeUnconfirmed(resumeOwed: true))
         XCTAssertFalse(f.calls.contains(["resume"]))
         XCTAssertEqual(f.paused, true)
         // An unreadable status after the revoke is not a confirmation either.
         let g = FakeCompanion(paused: false, accepted: "darwin-process-group-preview-v1")
         g.failStatusAfterChange = true
-        XCTAssertEqual(setExecuteLifecycle(allow: false, run: g.run), .revokeUnconfirmedPaused)
+        XCTAssertEqual(setExecuteLifecycle(allow: false, run: g.run), .revokeUnconfirmed(resumeOwed: true))
         XCTAssertFalse(g.calls.contains(["resume"]))
     }
 
@@ -190,6 +190,105 @@ final class MenuCoreTests: XCTestCase {
         XCTAssertEqual(setExecuteLifecycle(allow: true, run: f.run), .notChanged)
         XCTAssertEqual(f.paused, false)
         XCTAssertEqual(f.accepted, "")
+    }
+
+    func testAcceptWithAnUnreadableReadBackStaysPausedAndSaysSo() {
+        let f = FakeCompanion(paused: false)
+        f.failStatusAfterChange = true
+        let outcome = setExecuteLifecycle(allow: true, run: f.run)
+        XCTAssertEqual(outcome, .acceptUnverified(resumeOwed: true))
+        XCTAssertFalse(f.calls.contains(["resume"]))
+        XCTAssertEqual(f.paused, true)
+        XCTAssertEqual(f.accepted, f.contract) // it did change; nobody could see it
+        XCTAssertNil(lifecycleMessage(outcome, allow: true)) // never "nothing changed"
+        XCTAssertEqual(outcome.hold, .acceptUnverified(resumeOwed: true))
+        // Already paused by the owner: still unverified, and no resume owed.
+        let g = FakeCompanion(paused: true)
+        g.failStatusAfterChange = true
+        XCTAssertEqual(setExecuteLifecycle(allow: true, run: g.run), .acceptUnverified(resumeOwed: false))
+    }
+
+    func testHeldRevokeOffersOnlyTheRetryNeverResume() {
+        let items = lifecycleMenuItems(executeAccepted: true, paused: true, busy: false, awaitingRead: false,
+                                       hold: .revokeUnconfirmed(resumeOwed: true), note: nil)
+        XCTAssertEqual(items, [.note(LifecycleHold.revokeUnconfirmed(resumeOwed: true).message), .tryTurnOffAgain])
+        XCTAssertFalse(items.contains(.pauseOrResume(resume: true)))
+        XCTAssertFalse(items.contains { if case .runCommands = $0 { return true } else { return false } })
+    }
+
+    func testHeldAcceptOffersCheckOrTurnOffNeverResume() {
+        let items = lifecycleMenuItems(executeAccepted: nil, paused: true, busy: false, awaitingRead: false,
+                                       hold: .acceptUnverified(resumeOwed: true), note: nil)
+        XCTAssertEqual(items, [.note(LifecycleHold.acceptUnverified(resumeOwed: true).message), .checkAgain, .turnOffInstead])
+        // While a resolving action runs, nothing is clickable.
+        let busy = lifecycleMenuItems(executeAccepted: nil, paused: true, busy: true, awaitingRead: false,
+                                      hold: .acceptUnverified(resumeOwed: true), note: nil)
+        XCTAssertEqual(busy.count, 1)
+    }
+
+    func testRetryingTheRevokeResolvesTheHoldAndResumesOnlyWhenConfirmed() {
+        // State left by a failed revoke: paused by the menu, still accepted.
+        let f = FakeCompanion(paused: true, accepted: "darwin-process-group-preview-v1")
+        f.failChange = true
+        let again = resolveHold(.revokeUnconfirmed(resumeOwed: true), turnOff: true, run: f.run)
+        XCTAssertEqual(again, .revokeUnconfirmed(resumeOwed: true))
+        XCTAssertFalse(f.calls.contains(["resume"]))
+        XCTAssertEqual(f.paused, true)
+        f.failChange = false
+        XCTAssertEqual(resolveHold(.revokeUnconfirmed(resumeOwed: true), turnOff: true, run: f.run), .done)
+        XCTAssertEqual(f.accepted, "")
+        XCTAssertEqual(f.paused, false)
+        // No resume owed (the owner had paused it): stays paused.
+        let g = FakeCompanion(paused: true, accepted: "darwin-process-group-preview-v1")
+        XCTAssertEqual(resolveHold(.revokeUnconfirmed(resumeOwed: false), turnOff: true, run: g.run), .done)
+        XCTAssertEqual(g.paused, true)
+    }
+
+    func testCheckAgainResumesOnlyOnAReadableStatus() {
+        let f = FakeCompanion(paused: true, accepted: "darwin-process-group-preview-v1")
+        f.failStatusAfterChange = true
+        _ = f.run(["execute-lifecycle", "--accept-contract", f.contract]) // status now unreadable
+        XCTAssertEqual(resolveHold(.acceptUnverified(resumeOwed: true), turnOff: false, run: f.run),
+                       .acceptUnverified(resumeOwed: true))
+        XCTAssertFalse(f.calls.contains(["resume"]))
+        f.failStatusAfterChange = false
+        XCTAssertEqual(resolveHold(.acceptUnverified(resumeOwed: true), turnOff: false, run: f.run), .done)
+        XCTAssertEqual(f.paused, false)
+        // Readable and not accepted: resolved as "nothing changed", resumed.
+        let g = FakeCompanion(paused: true)
+        XCTAssertEqual(resolveHold(.acceptUnverified(resumeOwed: true), turnOff: false, run: g.run), .notChanged)
+        XCTAssertEqual(g.paused, false)
+        // Turning off instead runs the confirmed revoke.
+        let h = FakeCompanion(paused: true, accepted: "darwin-process-group-preview-v1")
+        XCTAssertEqual(resolveHold(.acceptUnverified(resumeOwed: true), turnOff: true, run: h.run), .done)
+        XCTAssertEqual(h.accepted, "")
+    }
+
+    func testResumeFailureAfterAConfirmedRevokeOffersResume() {
+        let f = FakeCompanion(paused: false, accepted: "darwin-process-group-preview-v1")
+        f.failResume = true
+        let outcome = setExecuteLifecycle(allow: false, run: f.run)
+        XCTAssertEqual(outcome, .changedButPaused)
+        XCTAssertNil(outcome.hold)
+        let items = lifecycleMenuItems(executeAccepted: false, paused: true, busy: false, awaitingRead: false,
+                                       hold: outcome.hold, note: lifecycleMessage(outcome, allow: false))
+        XCTAssertEqual(items, [.runCommands(checked: false, enabled: true),
+                               .note("Commands off, but the companion is paused"),
+                               .pauseOrResume(resume: true)])
+    }
+
+    func testTheOldSnapshotDrivesNothingUntilAFreshRead() {
+        let items = lifecycleMenuItems(executeAccepted: false, paused: false, busy: false, awaitingRead: true,
+                                       hold: nil, note: nil)
+        XCTAssertEqual(items, [.runCommands(checked: false, enabled: false)])
+    }
+
+    func testHoldSurvivesARestart() {
+        for h: LifecycleHold in [.revokeUnconfirmed(resumeOwed: true), .revokeUnconfirmed(resumeOwed: false),
+                                 .acceptUnverified(resumeOwed: true), .acceptUnverified(resumeOwed: false)] {
+            XCTAssertEqual(LifecycleHold(stored: h.stored), h)
+        }
+        XCTAssertNil(LifecycleHold(stored: "anything else"))
     }
 
     func testSnapshotReadsTheOptInOnlyWhenStatusSaysSo() {

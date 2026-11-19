@@ -98,10 +98,14 @@ download; read/write remain available.
 The menu bar app's **Let residents run commands on this Mac** item does this
 without Terminal. Turning it on asks once, at the Mac, what the contract
 means, then pauses the companion, accepts the contract the companion itself
-reports, reads status back and resumes. Turning it off revokes the same way,
-and if the revoke can't be confirmed it leaves the companion paused rather
-than resuming into the old permission. A pause that was already in place is
-kept. The house learns the result only as a display flag
+reports, reads status back and resumes. Turning it off revokes the same way.
+Nothing resumes until a readable status says what the permission now is: if
+the revoke can't be confirmed, or status can't be read after an accept, the
+companion stays paused, the menu says which, and it offers only the actions
+that settle it ("Try again to turn commands off", or "Check again" / "Turn
+commands off instead"), never a plain Resume. That held state survives a
+restart of the menu. A pause that was already in place is kept. The house
+learns the result only as a display flag
 (`execute_lifecycle_accepted` on the ceiling report) so the Computers page can
 say when it is off; that flag grants nothing. From Terminal:
 
