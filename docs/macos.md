@@ -20,8 +20,9 @@ or grants Full Disk Access. Never paste credentials into chat.
 
 **The usual way:** open the `.dmg` from the release, drag souls.house to
 Applications and open it. After one question it installs the companion
-(configuration only: not enrolled, not started), opens at login, and updates
-the companion whenever a newer app is dragged over it. No Terminal, no sudo.
+(configuration only: not enrolled, not started) and opens at login. No
+Terminal, no sudo. This release installs fresh only: on a Mac that already has
+an earlier setup it changes nothing and says so.
 The rest of this section describes the command-line install in the zip.
 
 Unpack, read this file and run `sh install.sh --accept-preview` as the owner,

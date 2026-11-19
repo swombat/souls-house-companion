@@ -66,50 +66,40 @@ final class InstallTests: XCTestCase {
                                                 withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: paths.launchAgent, contents: Data())
         XCTAssertEqual(ensure(), .upToDate)
-        XCTAssertFalse(calls().contains { $0.contains("pause") })
+        XCTAssertFalse(calls().contains { $0.contains("pause") || $0.contains("install") })
     }
 
-    func testRunningCompanionIsPausedSwappedAndResumed() throws {
+    func testADifferentInstalledCompanionIsLeftExactlyAsItIs() throws {
         try fake(at: paths.bundled, version: "v2")
         try fake(at: paths.installed, version: "v1", status: #"{"enrolled":true,"paused":false}"#)
-        XCTAssertEqual(ensure(), .updated(from: "v1", to: "v2"))
-        XCTAssertEqual(installedVersion(), "v2")
-        let c = calls()
-        XCTAssertTrue(c.contains("v1 pause"), "\(c)")
-        XCTAssertTrue(c.contains("v2 resume"), "the new binary resumes: \(c)")
-        XCTAssertEqual(versionOf(paths.installed + ".previous") { runCLI($0, $1, timeout: 5) }, "v1")
-    }
-
-    func testOwnerPausedCompanionStaysPaused() throws {
-        try fake(at: paths.bundled, version: "v2")
-        try fake(at: paths.installed, version: "v1", status: #"{"enrolled":true,"paused":true}"#)
-        XCTAssertEqual(ensure(), .updated(from: "v1", to: "v2"))
-        XCTAssertFalse(calls().contains { $0.hasSuffix("pause") || $0.hasSuffix("resume") }, "\(calls())")
-    }
-
-    func testUnpairedCompanionIsSwappedWithoutPause() throws {
-        try fake(at: paths.bundled, version: "v2")
-        try fake(at: paths.installed, version: "v1", status: nil)
-        XCTAssertEqual(ensure(), .updated(from: "v1", to: "v2"))
-        XCTAssertEqual(installedVersion(), "v2")
-    }
-
-    func testPauseFailureChangesNothing() throws {
-        try fake(at: paths.bundled, version: "v2")
-        try fake(at: paths.installed, version: "v1", status: #"{"enrolled":true,"paused":false}"#, fail: ["pause"])
-        guard case .failed = ensure() else { return XCTFail("expected failure") }
-        XCTAssertEqual(installedVersion(), "v1")
+        let before = try Data(contentsOf: URL(fileURLWithPath: paths.installed))
+        XCTAssertEqual(ensure(), .existingInstall(version: "v1"))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.installed)), before)
+        XCTAssertEqual(calls().filter { $0.hasPrefix("v1") }, ["v1 version"], "only asked its version")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.launchAgent))
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.installed + ".previous"))
     }
 
-    func testNewBinaryThatWontResumeIsRolledBack() throws {
-        try fake(at: paths.bundled, version: "v2", fail: ["resume"])
-        try fake(at: paths.installed, version: "v1", status: #"{"enrolled":true,"paused":false}"#)
-        XCTAssertEqual(ensure(), .failed("The updated companion didn't start; the previous one is back and running"))
-        let c = calls()
-        let tried = c.firstIndex(of: "v2 resume"), back = c.lastIndex(of: "v1 resume")
-        XCTAssertTrue(tried != nil && back != nil && tried! < back!, "the old binary resumes after: \(c)")
-        XCTAssertEqual(installedVersion(), "v1")
+    func testAnInstalledCompanionThatDoesntAnswerIsLeftAlone() throws {
+        try fake(at: paths.bundled, version: "v2")
+        try fake(at: paths.installed, version: "v1", fail: ["version"])
+        XCTAssertEqual(ensure(), .existingInstall(version: nil))
+        XCTAssertFalse(calls().contains { $0.hasPrefix("v2 install") || $0.contains("pause") })
+    }
+
+    func testEarlierSetupIsRecognised() throws {
+        let legacy = dir.appendingPathComponent("home/LaunchAgents/house.souls.menu.plist").path
+        let run: (String, [String]) -> CLIResult = { runCLI($0, $1, timeout: 5) }
+        try fake(at: paths.bundled, version: "v2")
+        XCTAssertFalse(earlierSetup(paths, legacyMenuAgent: legacy, run: run), "fresh Mac")
+        XCTAssertEqual(ensure(), .installed(version: "v2"))
+        XCTAssertFalse(earlierSetup(paths, legacyMenuAgent: legacy, run: run), "set up by this release")
+        FileManager.default.createFile(atPath: legacy, contents: Data())
+        XCTAssertTrue(earlierSetup(paths, legacyMenuAgent: legacy, run: run), "old menu agent")
+        try FileManager.default.removeItem(atPath: legacy)
+        try FileManager.default.removeItem(atPath: paths.installed)
+        try fake(at: paths.installed, version: "v1")
+        XCTAssertTrue(earlierSetup(paths, legacyMenuAgent: legacy, run: run), "other companion")
     }
 
     func testSymlinkedInstallIsRefused() throws {

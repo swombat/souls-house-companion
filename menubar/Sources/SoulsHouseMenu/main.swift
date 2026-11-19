@@ -97,12 +97,17 @@ final class Menu: NSObject, NSMenuDelegate {
         super.init()
         menu.delegate = self
         item.menu = menu
-        // Install or update the companion this app carries before anything reads it.
+        // Install the companion this app carries before anything reads it.
         inProgress = "Setting up the companion"
         build()
         coordinator.change({
             let outcome = ensureCompanion(install) { runCLI($0, $1, timeout: 40) }
-            DispatchQueue.main.async { self.installNote = outcome.note }
+            var notes = [outcome.note].compactMap { $0 }
+            if case .installed = outcome {
+                // Only right after a fresh install; afterwards the owner's choice stands.
+                if let failed = LoginItem.set(true) { notes.append(failed) }
+            }
+            DispatchQueue.main.async { self.installNote = notes.isEmpty ? nil : notes.joined(separator: " · ") }
             if case .failed = outcome { return false }
             return true
         }) { _ in
@@ -112,14 +117,7 @@ final class Menu: NSObject, NSMenuDelegate {
                 self.refresh()
             }
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            if replacedOnDisk() {
-                relaunch(Bundle.main.bundleURL)
-                NSApp.terminate(nil)
-                return
-            }
-            self?.refresh()
-        }
+        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.refresh() }
     }
 
     // One refresh at a time; a result read before or during a change is dropped.
@@ -255,7 +253,7 @@ final class Menu: NSObject, NSMenuDelegate {
 
     @objc func openPairing() { NSWorkspace.shared.open(pairingPage) }
     @objc func toggleLoginItem() {
-        LoginItem.set(LoginItem.current != .on)
+        installNote = LoginItem.set(LoginItem.current != .on)
         build()
     }
     @objc func openLoginItems() { SMAppService.openSystemSettingsLoginItems() }
@@ -366,9 +364,8 @@ let pairingPage = URL(string: "https://souls.house/companion#enrol-heading")!
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
-if moveToApplicationsIfNeeded() { exit(0) }
-retireOlderMenus()
+if mustBeInApplications() { exit(0) }
+if mustLeaveEarlierSetup() { exit(0) }
 if install.needsFirstInstall && !confirmFirstInstall() { exit(0) }
-LoginItem.registerOnFirstRun()
 let controller = Menu()
 app.run()

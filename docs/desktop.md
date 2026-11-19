@@ -206,18 +206,16 @@ batch entry; a non-desktop operation regression; `execute:false` throughout.
 A small AppKit status item, built on the Mac with Swift 5.9+
 (`scripts/build-menubar.sh [out] [companion] [version]` → `souls.house.app`).
 Released, it is the installer: the companion travels inside the app
-(`Contents/MacOS/souls-house-companion`) and on launch `ensureCompanion`
-(MenuCore/Install.swift) installs it to `~/.local/bin` after one question, or,
-when the installed version differs, pauses a running companion, keeps the old
-binary as `.previous`, moves the new one in and resumes it, putting the old one
-back if the new one won't resume. A companion the owner paused stays paused.
-Opened from outside Applications it offers to move itself there. It opens at
-login through macOS Login Items (`SMAppService`; "Open at login" in the menu),
-not a LaunchAgent: on first launch it removes the `house.souls.menu`
-LaunchAgent earlier releases installed, quits other running copies and moves
-`~/Applications/SoulsHouseMenu.app` to the Trash. A running copy that finds a
-different build on disk (an update dragged over it) opens the new one and
-quits. `scripts/install-menubar.sh` (with its stub test
+(`Contents/MacOS/souls-house-companion`), and on a Mac that doesn't have it yet
+`ensureCompanion` (MenuCore/Install.swift) installs it to `~/.local/bin` after
+one question (hard-link publish, never overwrites, refuses symlinks), runs
+`install --user` (configuration only: not enrolled, not started) and sets the
+app to open at login through macOS Login Items (`SMAppService`; "Open at
+login" in the menu). Opened outside Applications it asks to be dragged there
+first. **Fresh installs only:** on a Mac set up by an earlier release (another
+companion version installed, or the `house.souls.menu` LaunchAgent present) it
+says so and quits without changing anything. Updating gets its own release.
+`scripts/install-menubar.sh` (with its stub test
 `scripts/test-install-menubar.sh`) remains for development builds only.
 
 It holds no credentials and talks only to the installed companion CLI, with
