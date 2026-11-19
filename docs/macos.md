@@ -75,8 +75,9 @@ KEY is a grantable `key` from `volumes` (read unless `=write`). The command
 offers those volumes, prints `{"event":"code","code":"ABCD-EFGH","expires_at":...}`
 and waits. The owner types the code into souls.house Settings, Computers, Add a
 computer, and chooses the residents. Then it enrolls and saves state, prints
-`{"event":"paired","device_id":...}` and exits 0. It does **not** start the
-service: run `resume` afterwards.
+`{"event":"paired","device_id":...,"paused":true}` and exits 0. A new pairing
+is always saved **paused** (also across login) and nothing is shared until
+`resume`; the Mac window runs it unless you stopped the pairing.
 
 - The local ceiling is exactly what this device offered, for each approved
   resident, without execute; the house can only grant within it. A resident the

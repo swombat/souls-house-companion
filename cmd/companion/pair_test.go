@@ -148,13 +148,16 @@ func TestPairCommandHappyPathSavesStateAndPrintsEvents(t *testing.T) {
 	}
 	got := lines(t, p.out)
 	if len(got) != 2 || got[0]["event"] != "code" || got[0]["code"] != "ABCD-EFGH" || got[0]["expires_at"] == "" ||
-		got[1]["event"] != "paired" || got[1]["device_id"] != "dev1" {
+		got[1]["event"] != "paired" || got[1]["device_id"] != "dev1" || got[1]["paused"] != true {
 		t.Fatalf("stdout %v", got)
 	}
 	noSecrets(t, err, p.out)
 	state, err := client.Load(p.dir)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !state.Paused {
+		t.Fatal("a new pairing must be saved paused; the caller connects with resume")
 	}
 	r := state.Ceiling.Residents
 	if state.DeviceID != "dev1" || len(r) != 1 || r[0].ID != "r1" || r[0].Execute ||
@@ -242,7 +245,7 @@ func TestPairCommandSignalExitsOneThirtyWithNothingWritten(t *testing.T) {
 	}
 }
 
-func TestPairCommandStoppedAsTheHouseApprovesStaysPairedButPaused(t *testing.T) {
+func TestPairCommandStoppedAsTheHouseApprovesIsPausedToo(t *testing.T) {
 	p := newPairHarness(t, "approved")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
