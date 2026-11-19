@@ -1,7 +1,9 @@
 name: Companion release
 
-# Builds the darwin/arm64 command-line companion and the menu bar app, and
-# packages them into one zip. The build is signed (Developer ID, hardened
+# Builds the darwin/arm64 command-line companion and the menu bar app (which
+# carries the companion and installs it on first open), and packages them as a
+# disk image (the download: drag the app to Applications, open it) plus a zip
+# for command-line installs. The build is signed (Developer ID, hardened
 # runtime) and notarised only when ALL six Apple secrets are present. Without
 # them the zip is produced as an UNSIGNED workflow artifact and no release is
 # created. If the secrets ARE present, any signing, notarisation, stapling or
@@ -61,6 +63,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "STAGE_NAME=souls-house-companion-$version-darwin-arm64" >> "$GITHUB_ENV"
+          echo "DMG_BASE=souls.house-$version-darwin-arm64" >> "$GITHUB_ENV"
 
       - name: Check signing secrets
         id: secrets
@@ -81,11 +84,13 @@ jobs:
             echo "signed=true" >> "$GITHUB_OUTPUT"
             echo "SIGNED=true" >> "$GITHUB_ENV"
             echo "ZIP_NAME=$STAGE_NAME.zip" >> "$GITHUB_ENV"
+            echo "DMG_NAME=$DMG_BASE.dmg" >> "$GITHUB_ENV"
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"
             echo "SIGNED=false" >> "$GITHUB_ENV"
             # The file name itself says unsigned, so it cannot be mistaken for a release.
             echo "ZIP_NAME=$STAGE_NAME-UNSIGNED.zip" >> "$GITHUB_ENV"
+            echo "DMG_NAME=$DMG_BASE-UNSIGNED.dmg" >> "$GITHUB_ENV"
           fi
 
       - name: Ensure sha256sum exists (scripts/build-macos.sh uses it)
@@ -103,14 +108,15 @@ jobs:
         run: sh scripts/build-macos.sh dist
 
       - name: Build menu bar app (scripts/build-menubar.sh)
-        run: sh scripts/build-menubar.sh dist
+        # The app carries the companion just built and installs it on first open.
+        run: sh scripts/build-menubar.sh dist dist/companion-darwin-arm64 "$VERSION"
 
       - name: Assert both binaries are arm64
         shell: bash
         run: |
           set -euo pipefail
-          menu_bin="dist/SoulsHouseMenu.app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' dist/SoulsHouseMenu.app/Contents/Info.plist)"
-          for bin in dist/companion-darwin-arm64 "$menu_bin"; do
+          menu_bin="dist/souls.house.app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' dist/souls.house.app/Contents/Info.plist)"
+          for bin in dist/companion-darwin-arm64 "$menu_bin" dist/souls.house.app/Contents/MacOS/souls-house-companion; do
             archs=$(lipo -archs "$bin")
             echo "$bin: $archs"
             [ "$archs" = arm64 ] || { echo "expected arm64 only in $bin, got: $archs" >&2; exit 1; }
@@ -124,10 +130,9 @@ jobs:
           mkdir -p "$stage"
           cp dist/companion-darwin-arm64 "$stage/souls-house-companion"
           cp scripts/install-macos.sh "$stage/install.sh"
-          cp scripts/install-menubar.sh "$stage/install-menubar.sh"
           cp docs/macos.md "$stage/macos.md"
-          chmod 755 "$stage/souls-house-companion" "$stage/install.sh" "$stage/install-menubar.sh"
-          ditto dist/SoulsHouseMenu.app "$stage/SoulsHouseMenu.app"
+          chmod 755 "$stage/souls-house-companion" "$stage/install.sh"
+          ditto dist/souls.house.app "$stage/souls.house.app"
 
       - name: Import Developer ID certificate into a temporary keychain
         if: steps.secrets.outputs.signed == 'true'
@@ -172,11 +177,15 @@ jobs:
           # self-signed local identity). The app keeps house.souls.menu from its Info.plist.
           codesign --force --timestamp --options runtime --keychain "$SIGNING_KEYCHAIN" \
             --sign "$SIGNING_IDENTITY" --identifier house.souls.companion "$stage/souls-house-companion"
+          # The companion the app carries is signed first, as itself, then the app around it.
           codesign --force --timestamp --options runtime --keychain "$SIGNING_KEYCHAIN" \
-            --sign "$SIGNING_IDENTITY" "$stage/SoulsHouseMenu.app"
+            --sign "$SIGNING_IDENTITY" --identifier house.souls.companion \
+            "$stage/souls.house.app/Contents/MacOS/souls-house-companion"
+          codesign --force --timestamp --options runtime --keychain "$SIGNING_KEYCHAIN" \
+            --sign "$SIGNING_IDENTITY" "$stage/souls.house.app"
           codesign --verify --strict --verbose=2 "$stage/souls-house-companion"
-          codesign --verify --strict --deep --verbose=2 "$stage/SoulsHouseMenu.app"
-          for t in "$stage/souls-house-companion" "$stage/SoulsHouseMenu.app"; do
+          codesign --verify --strict --deep --verbose=2 "$stage/souls.house.app"
+          for t in "$stage/souls-house-companion" "$stage/souls.house.app" "$stage/souls.house.app/Contents/MacOS/souls-house-companion"; do
             codesign -dvv "$t" 2>&1 | grep -F "TeamIdentifier=$TEAM_ID" >/dev/null || { echo "unexpected team on $t" >&2; exit 1; }
           done
 
@@ -195,7 +204,7 @@ jobs:
           # notarytool takes a zip/dmg/pkg, so submit one zip holding both signed items.
           rm -rf notary && mkdir notary
           cp "$stage/souls-house-companion" notary/
-          ditto "$stage/SoulsHouseMenu.app" notary/SoulsHouseMenu.app
+          ditto "$stage/souls.house.app" notary/souls.house.app
           ditto -c -k --keepParent notary "$RUNNER_TEMP/notarise.zip"
           rm -rf notary
           # A non-zero exit here is tolerated only so the log can be fetched; the
@@ -218,16 +227,58 @@ jobs:
           rm -f "$key"
           # Only the .app can be stapled. A bare command-line binary has no place to
           # hold a ticket; Gatekeeper finds its notarisation online by code hash.
-          xcrun stapler staple "$stage/SoulsHouseMenu.app"
-          xcrun stapler validate "$stage/SoulsHouseMenu.app"
+          xcrun stapler staple "$stage/souls.house.app"
+          xcrun stapler validate "$stage/souls.house.app"
 
-      - name: Package zip and checksums
+      - name: Package disk image, zip and checksums
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release
           ditto -c -k --keepParent "stage/$STAGE_NAME" "release/$ZIP_NAME"
-          (cd release && shasum -a 256 "$ZIP_NAME" > SHA256SUMS)
+          # The download: the app and a link to Applications to drag it onto.
+          rm -rf dmg && mkdir dmg
+          ditto "stage/$STAGE_NAME/souls.house.app" dmg/souls.house.app
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname souls.house -srcfolder dmg -fs HFS+ -format UDZO -ov "release/$DMG_NAME"
+          rm -rf dmg
+          (cd release && shasum -a 256 "$DMG_NAME" "$ZIP_NAME" > SHA256SUMS)
+          cat release/SHA256SUMS
+
+      - name: Sign, notarise and staple the disk image
+        if: steps.secrets.outputs.signed == 'true'
+        shell: bash
+        env:
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          dmg="release/$DMG_NAME"
+          codesign --force --timestamp --keychain "$SIGNING_KEYCHAIN" --sign "$SIGNING_IDENTITY" "$dmg"
+          codesign -dvv "$dmg" 2>&1 | grep -F "TeamIdentifier=$TEAM_ID" >/dev/null || { echo "unexpected team on the disk image" >&2; exit 1; }
+          key="$RUNNER_TEMP/notary-key.p8"
+          printf '%s' "$NOTARY_KEY_P8_BASE64" | base64 --decode > "$key"
+          xcrun notarytool submit "$dmg" \
+            --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+            --wait --timeout 30m --output-format json > "$RUNNER_TEMP/notary-dmg.json" || true
+          status=$(jq -r '.status // "unknown"' "$RUNNER_TEMP/notary-dmg.json" || echo unknown)
+          id=$(jq -r '.id // empty' "$RUNNER_TEMP/notary-dmg.json" || true)
+          echo "disk image notarisation status: $status"
+          if [ "$status" != "Accepted" ]; then
+            if [ -n "$id" ]; then
+              xcrun notarytool log "$id" --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" || true
+            fi
+            rm -f "$key"
+            echo "Disk image notarisation did not succeed; failing the job." >&2
+            exit 1
+          fi
+          rm -f "$key"
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          spctl -a -vv -t open --context context:primary-signature "$dmg"
+          (cd release && shasum -a 256 "$DMG_NAME" "$ZIP_NAME" > SHA256SUMS)
           cat release/SHA256SUMS
 
       - name: Verify the packaged zip (signed builds)
@@ -239,12 +290,20 @@ jobs:
           ditto -x -k "release/$ZIP_NAME" verify
           d="verify/$STAGE_NAME"
           codesign --verify --strict --verbose=2 "$d/souls-house-companion"
-          codesign --verify --strict --deep --verbose=2 "$d/SoulsHouseMenu.app"
-          xcrun stapler validate "$d/SoulsHouseMenu.app"
+          codesign --verify --strict --deep --verbose=2 "$d/souls.house.app"
+          xcrun stapler validate "$d/souls.house.app"
           # Gatekeeper assessment applies to the app. spctl rejects a bare Mach-O
           # ("does not seem to be an app"), so the CLI is covered by codesign above.
-          spctl -a -vv -t exec "$d/SoulsHouseMenu.app"
+          spctl -a -vv -t exec "$d/souls.house.app"
           rm -rf verify
+          # The app inside the disk image is the one people install.
+          mnt=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "release/$DMG_NAME"
+          codesign --verify --strict --deep --verbose=2 "$mnt/souls.house.app"
+          xcrun stapler validate "$mnt/souls.house.app"
+          spctl -a -vv -t exec "$mnt/souls.house.app"
+          [ "$("$mnt/souls.house.app/Contents/MacOS/souls-house-companion" version)" != "" ]
+          hdiutil detach "$mnt"
 
       - name: Summary
         shell: bash
@@ -275,6 +334,7 @@ jobs:
         with:
           name: companion-signed-${{ steps.version.outputs.version }}
           path: |
+            release/${{ env.DMG_NAME }}
             release/${{ env.ZIP_NAME }}
             release/SHA256SUMS
           if-no-files-found: error
@@ -286,6 +346,7 @@ jobs:
         with:
           name: companion-UNSIGNED-not-for-distribution-${{ steps.version.outputs.version }}
           path: |
+            release/${{ env.DMG_NAME }}
             release/${{ env.ZIP_NAME }}
             release/SHA256SUMS
           if-no-files-found: error
@@ -380,8 +441,9 @@ jobs:
           set -euo pipefail
           gh release create "$TAG" --repo "$REPO" --draft --verify-tag \
             --title "$TAG" \
-            --notes "Signed and notarised darwin/arm64 build, plus linux/amd64 and linux/arm64 tarballs. Draft: open it on a clean Mac before publishing or linking." \
-            release/souls-house-companion-*-darwin-arm64.zip release/*-linux-*.tar.gz release/SHA256SUMS
+            --notes "Signed and notarised darwin/arm64 build (the .dmg is the download: open it, drag souls.house to Applications, open it), plus linux/amd64 and linux/arm64 tarballs. Draft: open it on a clean Mac before publishing or linking." \
+            release/souls.house-*-darwin-arm64.dmg release/souls-house-companion-*-darwin-arm64.zip \
+            release/*-linux-*.tar.gz release/SHA256SUMS
 
   # The early, unsigned build: only by hand, only when the signing secrets are
   # absent (a build with them is never published unsigned), and only as a
