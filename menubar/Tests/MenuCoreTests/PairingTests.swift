@@ -27,22 +27,53 @@ final class PairingTests: XCTestCase {
          {"mount_id":4,"mountpoint":"/Volumes/Odd","key":"K-odd","denied":"unexpected group"},
          {"mount_id":5,"mountpoint":"/Volumes/Photos Drive","key":"K-photos"}]
         """
+    /// Every listed disk is an ordinary writable drive unless a test says otherwise.
+    let plainDrives: (String) -> VolumeTraits? = { _ in VolumeTraits(readOnly: false, browsable: true) }
 
     func testGrantableVolumesKeepOnlyKeyedUndeniedAndPutMainDiskFirst() {
-        let v = grantableVolumes(from: Data(volumesJSON.utf8))
+        let v = grantableVolumes(from: Data(volumesJSON.utf8), traits: plainDrives)
         XCTAssertEqual(v?.map(\.key), ["K-data", "K-backup", "K-photos"])
         XCTAssertEqual(v?.map(\.label), ["Main disk (your files)", "Backup", "Photos Drive"])
         XCTAssertEqual(v?.map(\.isMain), [true, false, false])
     }
 
+    /// Daniel's Mac on 19 Nov listed Hardware, Preboot, Update, VM, iSCPreboot,
+    /// xarts and the installer's own disk image beside the main disk.
+    func testSystemVolumesAndTheInstallerImageAreNotOffered() {
+        let json = """
+            [{"mountpoint":"/System/Volumes/Data","key":"K-data"},
+             {"mountpoint":"/System/Volumes/Hardware","key":"K-hw"},
+             {"mountpoint":"/System/Volumes/Preboot","key":"K-pre"},
+             {"mountpoint":"/System/Volumes/Update","key":"K-up"},
+             {"mountpoint":"/System/Volumes/VM","key":"K-vm"},
+             {"mountpoint":"/System/Volumes/iSCPreboot","key":"K-isc"},
+             {"mountpoint":"/System/Volumes/xarts","key":"K-x"},
+             {"mountpoint":"/private/var/folders/xy/T/AppTranslocation/1","key":"K-tr"},
+             {"mountpoint":"/Volumes/souls.house","key":"K-dmg"},
+             {"mountpoint":"/Volumes/Hidden","key":"K-hid"},
+             {"mountpoint":"/Volumes/Gone","key":"K-gone"},
+             {"mountpoint":"/Volumes/Backup","key":"K-backup"}]
+            """
+        let traits: (String) -> VolumeTraits? = { m in
+            switch m {
+            case "/Volumes/souls.house": return VolumeTraits(readOnly: true, browsable: true)
+            case "/Volumes/Hidden": return VolumeTraits(readOnly: false, browsable: false)
+            case "/Volumes/Gone": return nil
+            default: return VolumeTraits(readOnly: false, browsable: true)
+            }
+        }
+        XCTAssertEqual(grantableVolumes(from: Data(json.utf8), traits: traits)?.map(\.key), ["K-data", "K-backup"])
+    }
+
     func testRootMountpointIsAlsoTheMainDisk() {
-        let v = grantableVolumes(from: Data(#"[{"mountpoint":"/","key":"K-root"}]"#.utf8))
+        let v = grantableVolumes(from: Data(#"[{"mountpoint":"/","key":"K-root"}]"#.utf8), traits: { _ in nil })
         XCTAssertEqual(v?.first?.label, "Main disk (your files)")
         XCTAssertEqual(v?.first?.isMain, true)
     }
 
     func testDuplicateKeysAppearOnce() {
-        let v = grantableVolumes(from: Data(#"[{"mountpoint":"/Volumes/A","key":"K"},{"mountpoint":"/Volumes/B","key":"K"}]"#.utf8))
+        let v = grantableVolumes(from: Data(#"[{"mountpoint":"/Volumes/A","key":"K"},{"mountpoint":"/Volumes/B","key":"K"}]"#.utf8),
+                                 traits: plainDrives)
         XCTAssertEqual(v?.map(\.label), ["A"])
     }
 
@@ -54,7 +85,7 @@ final class PairingTests: XCTestCase {
 
     func testListVolumesRunsTheCompanion() throws {
         let path = try script("[ \"$1\" = volumes ] && cat <<'J'\n\(volumesJSON)\nJ\n")
-        let v = listVolumes(companion: path) { runCLI($0, $1, timeout: 5) }
+        let v = listVolumes(companion: path, traits: plainDrives) { runCLI($0, $1, timeout: 5) }
         XCTAssertEqual(v?.count, 3)
     }
 

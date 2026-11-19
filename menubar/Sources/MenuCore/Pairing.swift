@@ -24,9 +24,37 @@ public func volumeLabel(_ mountpoint: String) -> String {
     return last.isEmpty ? mountpoint : last
 }
 
-/// Disks that can be offered: a key, and nothing denying them. Anything we
-/// cannot read as a list of volumes gives nil, so the window can say so.
-public func grantableVolumes(from data: Data) -> [PairVolume]? {
+/// What the window needs to know about a mounted volume beyond the companion's list.
+public struct VolumeTraits: Equatable {
+    public let readOnly: Bool
+    public let browsable: Bool
+    public init(readOnly: Bool, browsable: Bool) { self.readOnly = readOnly; self.browsable = browsable }
+}
+
+/// Asks macOS about a mounted volume; nil when it can't say.
+public func systemVolumeTraits(_ mountpoint: String) -> VolumeTraits? {
+    let keys: Set<URLResourceKey> = [.volumeIsReadOnlyKey, .volumeIsBrowsableKey]
+    guard let v = try? URL(fileURLWithPath: mountpoint, isDirectory: true).resourceValues(forKeys: keys),
+          let ro = v.volumeIsReadOnly else { return nil }
+    return VolumeTraits(readOnly: ro, browsable: v.volumeIsBrowsable ?? true)
+}
+
+/// Whether a disk belongs in the list an owner sees (Daniel, YMamQY YQwBAg):
+/// the main disk, and drives the owner plugged in. macOS's own volumes
+/// (Preboot, VM, Update, Hardware, iSCPreboot, xarts, all under
+/// /System/Volumes) never; nor read-only disks such as the installer's disk
+/// image, nor anything macOS hides from Finder or can't describe.
+public func isOfferable(_ mountpoint: String, traits: (String) -> VolumeTraits?) -> Bool {
+    if isMainDisk(mountpoint) { return true }
+    guard mountpoint.hasPrefix("/Volumes/"), mountpoint.count > "/Volumes/".count else { return false }
+    guard let t = traits(mountpoint) else { return false }
+    return !t.readOnly && t.browsable
+}
+
+/// Disks that can be offered: a key, nothing denying them, and a disk an owner
+/// would recognise (`isOfferable`). Anything we cannot read as a list of
+/// volumes gives nil, so the window can say so.
+public func grantableVolumes(from data: Data, traits: (String) -> VolumeTraits? = systemVolumeTraits) -> [PairVolume]? {
     guard let list = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return nil }
     var seen = Set<String>()
     var out: [PairVolume] = []
@@ -34,6 +62,7 @@ public func grantableVolumes(from data: Data) -> [PairVolume]? {
         guard let key = entry["key"] as? String, !key.isEmpty,
               (entry["denied"] as? String ?? "").isEmpty,
               let mount = entry["mountpoint"] as? String, !mount.isEmpty,
+              isOfferable(mount, traits: traits),
               seen.insert(key).inserted else { continue }
         out.append(PairVolume(key: key, mountpoint: mount, label: volumeLabel(mount), isMain: isMainDisk(mount)))
     }
@@ -42,10 +71,11 @@ public func grantableVolumes(from data: Data) -> [PairVolume]? {
 }
 
 /// Lists the disks by asking the companion.
-public func listVolumes(companion: String, run: (String, [String]) -> CLIResult) -> [PairVolume]? {
+public func listVolumes(companion: String, traits: (String) -> VolumeTraits? = systemVolumeTraits,
+                        run: (String, [String]) -> CLIResult) -> [PairVolume]? {
     let result = run(companion, ["volumes"])
     guard result.succeeded else { return nil }
-    return grantableVolumes(from: result.output)
+    return grantableVolumes(from: result.output, traits: traits)
 }
 
 /// The name the house shows for this Mac: the Mac's own name, tidied to what
