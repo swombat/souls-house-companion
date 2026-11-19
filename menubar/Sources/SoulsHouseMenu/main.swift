@@ -126,7 +126,9 @@ final class Menu: NSObject, NSMenuDelegate {
         let mark: HouseMark = on ? .on : (snapshot.desktop == .unknown ? .unknown : .off)
         item.button?.title = ""
         item.button?.image = houseMark(mark)
-        item.button?.toolTip = mark.toolTip
+        // No tooltip: build() runs on every 5-second refresh, and re-setting a
+        // status item's toolTip left it stuck to the owner's cursor. The image's
+        // accessibilityDescription still names the state for VoiceOver.
         menu.removeAllItems()
         if !snapshot.companionReachable {
             menu.addItem(disabled("Companion not answering"))
