@@ -46,9 +46,13 @@ acceptance or Windows support is claimed.
 (`workflow_dispatch`), on `macos-15` (Apple Silicon; both binaries are checked
 to be arm64). It builds the darwin/arm64
 command-line companion (`scripts/build-macos.sh`) and the menu bar app
-(`scripts/build-menubar.sh`) and packages both as
-`souls-house-companion-<version>-darwin-arm64.zip` with a `SHA256SUMS` file
-(version is the tag, or `dev-<shortsha>` on manual runs).
+(`scripts/build-menubar.sh`, which puts the companion inside the app) and
+packages them as `souls.house-<version>-darwin-arm64.dmg`, the download (open
+it, drag souls.house to Applications, open the app; on a Mac without it, it
+installs the companion itself), and `souls-house-companion-<version>-darwin-arm64.zip` for
+command-line installs, with a `SHA256SUMS` file (version is the tag, or
+`dev-<shortsha>` on manual runs). The disk image is signed, notarised and
+stapled as well as the app inside it.
 
 A separate `linux` job on `ubuntu-24.04` builds static linux/amd64 and
 linux/arm64 tarballs (`scripts/build-linux.sh`, which checks each ELF machine

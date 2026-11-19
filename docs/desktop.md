@@ -204,15 +204,19 @@ batch entry; a non-desktop operation regression; `execute:false` throughout.
 ## Menu bar (`menubar/`)
 
 A small AppKit status item, built on the Mac with Swift 5.9+
-(`scripts/build-menubar.sh` → `dist/SoulsHouseMenu.app`, ad-hoc signed like
-the companion) and installed per user with `scripts/install-menubar.sh`
-(`~/Applications/SoulsHouseMenu.app`, LaunchAgent `house.souls.menu` at
-login, no sudo). The installer stages and verifies the new copy (bundle,
-executable, `codesign --verify`) before touching the installed one, keeps the
-previous copy as `.previous`, and if loading fails puts the previous copy back
-and loads it. Roll back with `scripts/install-menubar.sh --rollback`; an
-installed copy is refused as a source. `scripts/test-install-menubar.sh` runs
-the installer against stub launchctl/codesign in a throwaway HOME.
+(`scripts/build-menubar.sh [out] [companion] [version]` → `souls.house.app`).
+Released, it is the installer: the companion travels inside the app
+(`Contents/MacOS/souls-house-companion`), and on a Mac that doesn't have it yet
+`ensureCompanion` (MenuCore/Install.swift) installs it to `~/.local/bin` after
+one question (hard-link publish, never overwrites, refuses symlinks), runs
+`install --user` (configuration only: not enrolled, not started) and sets the
+app to open at login through macOS Login Items (`SMAppService`; "Open at
+login" in the menu). Opened outside Applications it asks to be dragged there
+first. **Fresh installs only:** on a Mac set up by an earlier release (another
+companion version installed, or the `house.souls.menu` LaunchAgent present) it
+says so and quits without changing anything. Updating gets its own release.
+`scripts/install-menubar.sh` (with its stub test
+`scripts/test-install-menubar.sh`) remains for development builds only.
 
 It holds no credentials and talks only to the installed companion CLI, with
 a deadline that does not depend on the child (TERM, then KILL), a 1 MiB

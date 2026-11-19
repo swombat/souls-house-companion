@@ -4,6 +4,7 @@
 // CLI. Every authority decision (including expiry) is enforced by the
 // companion; if this app quits or crashes, control still turns itself off.
 import AppKit
+import ServiceManagement
 import MenuCore
 
 let companion = (NSHomeDirectory() as NSString).appendingPathComponent(".local/bin/souls-house-companion")
@@ -81,6 +82,8 @@ final class Menu: NSObject, NSMenuDelegate {
     var snapshot = Snapshot()
     var failedAction: String?
     var lifecycleNote: String?
+    /// What setting up or updating the companion did, shown until the next change.
+    var installNote: String?
     var inProgress: String?
     /// An unresolved run-commands change, kept across restarts of the menu.
     var hold: LifecycleHold? = UserDefaults.standard.string(forKey: holdKey).flatMap(LifecycleHold.init(stored:)) {
@@ -94,7 +97,26 @@ final class Menu: NSObject, NSMenuDelegate {
         super.init()
         menu.delegate = self
         item.menu = menu
-        refresh()
+        // Install the companion this app carries before anything reads it.
+        inProgress = "Setting up the companion"
+        build()
+        coordinator.change({
+            let outcome = ensureCompanion(install) { runCLI($0, $1, timeout: 40) }
+            var notes = [outcome.note].compactMap { $0 }
+            if case .installed = outcome {
+                // Only right after a fresh install; afterwards the owner's choice stands.
+                if let failed = LoginItem.set(true) { notes.append(failed) }
+            }
+            DispatchQueue.main.async { self.installNote = notes.isEmpty ? nil : notes.joined(separator: " · ") }
+            if case .failed = outcome { return false }
+            return true
+        }) { _ in
+            DispatchQueue.main.async {
+                if !self.coordinator.busy { self.inProgress = nil }
+                self.build()
+                self.refresh()
+            }
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.refresh() }
     }
 
@@ -130,7 +152,13 @@ final class Menu: NSObject, NSMenuDelegate {
         // status item's toolTip left it stuck to the owner's cursor. The image's
         // accessibilityDescription still names the state for VoiceOver.
         menu.removeAllItems()
-        if !snapshot.companionReachable {
+        if let installNote {
+            menu.addItem(disabled(installNote))
+        }
+        if !snapshot.companionReachable && notPaired() {
+            menu.addItem(disabled("This Mac isn't paired yet"))
+            menu.addItem(action("How to pair it…", #selector(openPairing)))
+        } else if !snapshot.companionReachable {
             menu.addItem(disabled("Companion not answering"))
         }
         switch snapshot.desktop {
@@ -206,8 +234,29 @@ final class Menu: NSObject, NSMenuDelegate {
             menu.addItem(disabled(last))
         }
         menu.addItem(.separator())
+        let login = LoginItem.current
+        let loginItem = action("Open at login", #selector(toggleLoginItem))
+        loginItem.state = login == .on ? .on : .off
+        menu.addItem(loginItem)
+        if login == .needsApproval {
+            menu.addItem(action("Allow in Login Items settings…", #selector(openLoginItems)))
+        }
         menu.addItem(action("Quit menu", #selector(quit)))
     }
+
+    /// No enrolment state on disk yet: the companion is installed but has
+    /// never been paired, which is expected right after setup.
+    func notPaired() -> Bool {
+        let state = (home as NSString).appendingPathComponent(".local/share/souls-house-companion/state.json")
+        return !FileManager.default.fileExists(atPath: state)
+    }
+
+    @objc func openPairing() { NSWorkspace.shared.open(pairingPage) }
+    @objc func toggleLoginItem() {
+        installNote = LoginItem.set(LoginItem.current != .on)
+        build()
+    }
+    @objc func openLoginItems() { SMAppService.openSystemSettingsLoginItems() }
 
     func disabled(_ title: String) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: nil, keyEquivalent: "")
@@ -311,7 +360,12 @@ final class Menu: NSObject, NSMenuDelegate {
     @objc func quit() { NSApp.terminate(nil) }
 }
 
+let pairingPage = URL(string: "https://souls.house/companion#enrol-heading")!
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
+if mustBeInApplications() { exit(0) }
+if mustLeaveEarlierSetup() { exit(0) }
+if install.needsFirstInstall && !confirmFirstInstall() { exit(0) }
 let controller = Menu()
 app.run()
