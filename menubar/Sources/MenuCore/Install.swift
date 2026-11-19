@@ -8,17 +8,28 @@ public struct CompanionInstall {
     public let installed: String
     /// The companion's LaunchAgent plist (written by `install --user`).
     public let launchAgent: String
+    /// The companion's enrollment state. Only its presence is ever checked.
+    public let state: String
 
-    public init(bundled: String, installed: String, launchAgent: String) {
+    public init(bundled: String, installed: String, launchAgent: String, state: String) {
         self.bundled = bundled
         self.installed = installed
         self.launchAgent = launchAgent
+        self.state = state
     }
 
     public init(bundled: String, home: String) {
         self.init(bundled: bundled,
                   installed: (home as NSString).appendingPathComponent(".local/bin/souls-house-companion"),
-                  launchAgent: (home as NSString).appendingPathComponent("Library/LaunchAgents/house.souls.companion.plist"))
+                  launchAgent: (home as NSString).appendingPathComponent("Library/LaunchAgents/house.souls.companion.plist"),
+                  state: (home as NSString).appendingPathComponent(".local/share/souls-house-companion/state.json"))
+    }
+
+    /// True when the binary is gone but an earlier setup's LaunchAgent or
+    /// enrollment is still there (or can't be checked). Installing then would
+    /// put a binary back under an old login job and an old enrollment.
+    public var leftovers: Bool {
+        present(launchAgent) != false || present(state) != false
     }
 
     /// True when nothing is installed yet, so the owner is asked before the
@@ -34,6 +45,8 @@ public enum InstallOutcome: Equatable {
     /// A different companion is already installed. This release only installs
     /// fresh: it leaves an existing installation exactly as it is.
     case existingInstall(version: String?)
+    /// No companion, but an earlier setup's login job or enrollment remains.
+    case leftovers
     case failed(String)
 
     /// One line for the menu, or nil when there is nothing to say.
@@ -42,6 +55,7 @@ public enum InstallOutcome: Equatable {
         case .upToDate: return nil
         case let .installed(v): return "Companion installed (\(v))"
         case .existingInstall: return "An earlier companion is installed; left as it is"
+        case .leftovers: return "An earlier setup's files remain; nothing installed"
         case let .failed(why): return why
         }
     }
@@ -52,6 +66,14 @@ func versionOf(_ path: String, _ run: (String, [String]) -> CLIResult) -> String
     guard r.succeeded, let s = String(data: r.output, encoding: .utf8) else { return nil }
     let v = s.trimmingCharacters(in: .whitespacesAndNewlines)
     return v.isEmpty ? nil : v
+}
+
+/// Whether something is at `path` (not following symlinks): nil when that
+/// can't be told, which callers treat as present.
+func present(_ path: String) -> Bool? {
+    var st = stat()
+    if lstat(path, &st) == 0 { return true }
+    return errno == ENOENT ? false : nil
 }
 
 func isSymlink(_ path: String) -> Bool {
@@ -83,6 +105,7 @@ public func ensureCompanion(_ paths: CompanionInstall,
         guard installed == bundledVersion else { return .existingInstall(version: installed) }
         return configure(paths, run) ?? .upToDate
     }
+    if paths.leftovers { return .leftovers }
     let staging = target + ".staging"
     do {
         try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -102,12 +125,30 @@ public func ensureCompanion(_ paths: CompanionInstall,
 }
 
 /// Writes the companion's LaunchAgent when it is missing. Returns a failure,
-/// or nil when the configuration is in place.
+/// or nil when a complete configuration is in place. A plist that exists but
+/// isn't the companion's whole job (a write that failed half way) is a
+/// failure, never success, and a failed `install` is a failure whatever it
+/// left behind.
 func configure(_ paths: CompanionInstall, _ run: (String, [String]) -> CLIResult) -> InstallOutcome? {
-    if (try? FileManager.default.attributesOfItem(atPath: paths.launchAgent)) != nil { return nil }
-    if run(paths.installed, ["install", "--user"]).succeeded { return nil }
-    if (try? FileManager.default.attributesOfItem(atPath: paths.launchAgent)) != nil { return nil }
-    return .failed("The companion is installed but its login item couldn't be written")
+    let broken = InstallOutcome.failed("The companion is installed but its login item couldn't be written")
+    switch present(paths.launchAgent) {
+    case true?: return launchAgentValid(paths) ? nil : broken
+    case nil: return broken
+    case false?: break
+    }
+    guard run(paths.installed, ["install", "--user"]).succeeded, launchAgentValid(paths) else { return broken }
+    return nil
+}
+
+/// The plist parses and runs this companion under the companion's label.
+func launchAgentValid(_ paths: CompanionInstall) -> Bool {
+    guard !isSymlink(paths.launchAgent),
+          let data = FileManager.default.contents(atPath: paths.launchAgent),
+          let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+          plist["Label"] as? String == "house.souls.companion",
+          let args = plist["ProgramArguments"] as? [String],
+          args.first == paths.installed, args.dropFirst().first == "serve" else { return false }
+    return true
 }
 
 /// True when this Mac was set up by an earlier release (or by hand): a
@@ -116,7 +157,7 @@ func configure(_ paths: CompanionInstall, _ run: (String, [String]) -> CLIResult
 public func earlierSetup(_ paths: CompanionInstall, legacyMenuAgent: String,
                          run: (String, [String]) -> CLIResult) -> Bool {
     if (try? FileManager.default.attributesOfItem(atPath: legacyMenuAgent)) != nil { return true }
-    if paths.needsFirstInstall { return false }
+    if paths.needsFirstInstall { return paths.leftovers }
     guard let bundled = versionOf(paths.bundled, run) else { return true }
     return versionOf(paths.installed, run) != bundled
 }
