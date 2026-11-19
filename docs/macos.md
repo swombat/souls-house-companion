@@ -56,6 +56,26 @@ The installed plist can load at the next login.
    a successful pause. Missing/unenrolled/uninstalled state exits successfully
    at login instead of entering a restart loop.
 
+### Pair with a code (no grant file)
+
+`souls-house-companion pair --url https://souls.house --name "NAME" --volume KEY[=write] [--volume ...] [--state-dir DIR]`
+
+KEY is a grantable `key` from `volumes` (read unless `=write`). The command
+offers those volumes, prints `{"event":"code","code":"ABCD-EFGH","expires_at":...}`
+and waits. The owner types the code into souls.house Settings, Computers, Add a
+computer, and chooses the residents. Then it enrolls and saves state, prints
+`{"event":"paired","device_id":...}` and exits 0. It does **not** start the
+service: run `resume` afterwards.
+
+- The local ceiling is exactly what this device offered, for each approved
+  resident, without execute; the house can only grant within it. A resident the
+  owner adds later needs `policy apply`.
+- `{"event":"expired"}` or `{"event":"cancelled"}` exits 3. Any other failure is one
+  line on stderr, exit 1. SIGINT/SIGTERM while waiting exits 130 and writes
+  nothing. Refused up front, with no network call, if `state.json` exists or a
+  volume is unknown or denied.
+- The poll secret and enrollment token are never printed or logged.
+
 TCC may deny Documents/Desktop/Downloads, removable/network volumes and iCloud.
 A background agent cannot show an interactive prompt. EPERM/EACCES receipts
 say `os_permission_denied` with possible TCC/POSIX/ACL causes, separately from

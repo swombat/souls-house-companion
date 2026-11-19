@@ -32,6 +32,13 @@ const systemctlTimeout = 35 * time.Second
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		// Error values from network/operation payloads are never interpolated.
+		var exit *exitError
+		if errors.As(err, &exit) {
+			if exit.msg != "" {
+				fmt.Fprintln(os.Stderr, exit.msg)
+			}
+			os.Exit(exit.code)
+		}
 		fmt.Fprintln(os.Stderr, platformDiagnostic(err))
 		os.Exit(1)
 	}
@@ -79,6 +86,9 @@ func run(args []string) error {
 	revokeContract := flags.Bool("revoke", false, "revoke local execute lifecycle acceptance (pause first)")
 	requestAccessibility := flags.Bool("request", false, "accessibility: ask the running service to request macOS Accessibility")
 	_ = flags.Bool("json", false, "machine-readable status")
+	pairName := flags.String("name", "", "pair: name shown to the house owner")
+	var pairVolumes stringList
+	flags.Var(&pairVolumes, "volume", "pair: volume KEY or KEY=write to offer (repeatable)")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -209,6 +219,11 @@ func run(args []string) error {
 			return err
 		}
 		return client.Save(*dir, state)
+	case "pair":
+		// Signals cancel only the wait; see client.Pair for the enrollment step.
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		return pairCommand(ctx, *dir, *base, *pairName, pairVolumes, newPairDeps())
 	case "install":
 		if !*user {
 			return errors.New("only user installation supported")
