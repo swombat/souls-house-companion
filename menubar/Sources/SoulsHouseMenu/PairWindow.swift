@@ -203,6 +203,13 @@ final class PairWindow: NSObject, NSWindowDelegate {
         case .paired:
             run = nil
             startConnection()
+        case .pairedPaused:
+            // Stopped just as souls.house approved: paired, saved paused, and it
+            // stays that way (also across login) until the person chooses.
+            run = nil
+            onPaired()
+            show(message: "This Mac finished pairing just as you stopped it, so it is paired but paused: nothing is shared. Connect it when you're ready, or remove it under Settings → Computers on souls.house.",
+                 buttons: [button("Connect", #selector(startConnection)), button("Close", #selector(closeWindow))])
         case .expired:
             run = nil
             show(message: "That code ran out of time. A code works for 15 minutes, and nothing was shared.",

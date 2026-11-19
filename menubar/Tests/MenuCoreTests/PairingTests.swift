@@ -91,6 +91,7 @@ final class PairingTests: XCTestCase {
         XCTAssertEqual(parsePairEvent(#"{"event":"expired"}"#), .expired)
         XCTAssertEqual(parsePairEvent(#"{"event":"cancelled"}"#), .cancelled)
         XCTAssertEqual(parsePairEvent(#"{"event":"uncertain"}"#), .uncertain)
+        XCTAssertEqual(parsePairEvent(#"{"event":"paired","device_id":"d1","paused":true}"#), .pairedPaused)
         XCTAssertNil(parsePairEvent(#"{"event":"code"}"#))
         XCTAssertNil(parsePairEvent(#"{"event":"surprise"}"#))
         XCTAssertNil(parsePairEvent("not json"))
@@ -157,15 +158,15 @@ final class PairingTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker))
     }
 
-    func testCancelRacingAnApprovalStillReportsPaired() throws {
+    func testCancelRacingAnApprovalEndsPairedButPaused() throws {
         // Like `pair`: a stop after approval lets enrollment finish and say so.
         let states = try run("""
-            paired() { echo '{"event":"paired","device_id":"d1"}'; exit 0; }
+            paired() { echo '{"event":"paired","device_id":"d1","paused":true}'; exit 0; }
             trap paired TERM
             echo '{"event":"code","code":"ABCD-EFGH"}'
             sleep 5 & wait
             """, cancelWhen: { if case .code = $0 { return true } else { return false } })
-        XCTAssertEqual(states.last, .paired)
+        XCTAssertEqual(states.last, .pairedPaused)
     }
 
     func testUncertainIsNeitherPairedNorNothing() throws {

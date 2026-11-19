@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/swombat/souls-house-companion/internal/client"
@@ -93,10 +94,24 @@ func pairCommand(ctx context.Context, dir, base, name string, specs []string, d 
 	case err != nil:
 		return pairFailure(err)
 	}
+	// Stopped after the house approved: enrollment finished, but the person
+	// asked to stop, so this computer is saved paired AND paused (serve stays
+	// idle across logins) until they choose to connect; the deny marker `pause`
+	// also writes follows once the state directory exists.
+	stopped := ctx.Err() != nil
+	state.Paused = stopped
 	if err := client.Save(dir, state); err != nil {
 		// The house has this device now; this Mac doesn't. Say so plainly.
 		_ = enc.Encode(map[string]string{"event": "uncertain"})
 		return &exitError{code: 4, msg: "companion: paired with the house but could not save state: " + err.Error()}
+	}
+	if stopped {
+		if marker, err := os.OpenFile(filepath.Join(dir, "paused"), os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0600); err == nil {
+			_ = marker.Sync()
+			marker.Close()
+		}
+		_ = enc.Encode(map[string]any{"event": "paired", "device_id": state.DeviceID, "paused": true})
+		return nil
 	}
 	_ = enc.Encode(map[string]string{"event": "paired", "device_id": state.DeviceID})
 	return nil

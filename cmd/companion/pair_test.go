@@ -29,6 +29,8 @@ type cmdHouse struct {
 	id     string
 	claims []string // "pending", "approved", "expired", "cancelled", "unknown"
 	n      int
+	// onEnroll runs as the house commits an enrollment (e.g. a signal arriving).
+	onEnroll func()
 }
 
 func (h *cmdHouse) handler(w http.ResponseWriter, r *http.Request) {
@@ -60,6 +62,9 @@ func (h *cmdHouse) handler(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(`{"status":"` + step + `"}`))
 		}
 	case "/api/v1/companion/enroll":
+		if h.onEnroll != nil {
+			h.onEnroll()
+		}
 		json.NewEncoder(w).Encode(map[string]string{"device_id": "dev1", "device_credential": "shcd_synthetic-credential"})
 	default:
 		w.WriteHeader(404)
@@ -107,13 +112,13 @@ func exitCode(err error) int {
 	return 0
 }
 
-func lines(t *testing.T, out *bytes.Buffer) []map[string]string {
-	var all []map[string]string
+func lines(t *testing.T, out *bytes.Buffer) []map[string]any {
+	var all []map[string]any
 	for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {
 		if l == "" {
 			continue
 		}
-		var m map[string]string
+		var m map[string]any
 		if err := json.Unmarshal([]byte(l), &m); err != nil {
 			t.Fatalf("stdout line %q is not JSON", l)
 		}
@@ -234,5 +239,27 @@ func TestPairCommandSignalExitsOneThirtyWithNothingWritten(t *testing.T) {
 	}
 	if _, statErr := os.Lstat(filepath.Join(p.dir, "state.json")); !os.IsNotExist(statErr) {
 		t.Fatal("state written")
+	}
+}
+
+func TestPairCommandStoppedAsTheHouseApprovesStaysPairedButPaused(t *testing.T) {
+	p := newPairHarness(t, "approved")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.house.onEnroll = cancel // the stop arrives while enrollment commits
+	err := p.run(ctx, "k-data")
+	if err != nil {
+		t.Fatalf("exit %d: %v", exitCode(err), err)
+	}
+	got := lines(t, p.out)
+	if len(got) != 2 || got[1]["event"] != "paired" || got[1]["paused"] != true {
+		t.Fatalf("stdout %v", got)
+	}
+	state, err := client.Load(p.dir)
+	if err != nil || !state.Paused || state.DeviceID != "dev1" {
+		t.Fatalf("state %+v %v", state, err)
+	}
+	if _, err := os.Lstat(filepath.Join(p.dir, "paused")); err != nil {
+		t.Fatal("no deny marker: it would connect at the next login")
 	}
 }

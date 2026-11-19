@@ -76,6 +76,8 @@ public func pairArguments(url: String, name: String, choices: [PairChoice]) -> [
 public enum PairEvent: Equatable {
     case code(String, expiresAt: Date?)
     case paired
+    /// Paired as a stop arrived: saved paused, nothing shared until Connect.
+    case pairedPaused
     case expired
     case cancelled
     /// The house may have added this Mac, but the answer never arrived.
@@ -90,7 +92,7 @@ public func parsePairEvent(_ line: String) -> PairEvent? {
     case "code":
         guard let code = o["code"] as? String, !code.isEmpty else { return nil }
         return .code(code, expiresAt: parseDate(o["expires_at"]))
-    case "paired": return .paired
+    case "paired": return (o["paused"] as? Bool) == true ? .pairedPaused : .paired
     case "expired": return .expired
     case "cancelled": return .cancelled
     case "uncertain": return .uncertain
@@ -130,6 +132,7 @@ public enum PairState: Equatable {
     case expired
     case cancelled
     case uncertain
+    case pairedPaused
     case failed(String)
 
     public var isFinal: Bool {
@@ -149,6 +152,7 @@ public final class PairingRun {
     private let process = Process()
     private let lock = NSLock()
     private var state = PairState.waiting
+    private var sawPairedPaused = false
     private var sawPaired = false, sawExpired = false, sawCancelled = false, sawUncertain = false
     private var cancelRequested = false
     private var finished = false
@@ -217,6 +221,7 @@ public final class PairingRun {
         switch event {
         case let .code(code, expiresAt): next = .code(code, expiresAt: expiresAt)
         case .paired: sawPaired = true; next = nil
+        case .pairedPaused: sawPairedPaused = true; next = nil
         case .expired: sawExpired = true; next = nil
         case .cancelled: sawCancelled = true; next = nil
         case .uncertain: sawUncertain = true; next = nil
@@ -232,13 +237,15 @@ public final class PairingRun {
         let status = process.terminationStatus
         let stopped = cancelRequested
         let (paired, expired, cancelled, uncertain) = (sawPaired, sawExpired, sawCancelled, sawUncertain)
+        let pairedPaused = sawPairedPaused
         let message = String(decoding: stderrText, as: UTF8.self)
             .split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
         lock.unlock()
         let final: PairState
         // What the command reports wins over a cancel: once the house has
         // approved, `pair` finishes enrolling even when asked to stop.
-        if paired && status == 0 { final = .paired }
+        if pairedPaused && status == 0 { final = .pairedPaused }
+        else if paired && status == 0 { final = .paired }
         else if uncertain { final = .uncertain }
         else if stopped { final = .cancelled }
         else if expired { final = .expired }
