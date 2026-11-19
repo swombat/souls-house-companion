@@ -30,8 +30,11 @@ type fakeHouse struct {
 	enrolled map[string]string
 	nClaims  int
 	nEnroll  int
-	lifetime time.Duration
-	interval int
+	// enrollDrops: how many /enroll replies are lost after the house has
+	// committed (the connection is cut instead of answered).
+	enrollDrops int
+	lifetime    time.Duration
+	interval    int
 }
 
 func newFakeHouse(t *testing.T, claims ...func(http.ResponseWriter, *http.Request)) (*fakeHouse, *httptest.Server) {
@@ -69,6 +72,13 @@ func (h *fakeHouse) serve(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/api/v1/companion/enroll":
 		h.nEnroll++
 		json.NewDecoder(r.Body).Decode(&h.enrolled)
+		if h.nEnroll <= h.enrollDrops {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				conn.Close()
+			}
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]string{"device_id": "dev1", "device_credential": "shcd_synthetic"})
 	default:
 		w.WriteHeader(404)
@@ -373,5 +383,38 @@ func TestPairLabels(t *testing.T) {
 	}
 	if got := pairLabel("/Volumes/" + strings.Repeat("é", 80)); len(got) > 100 || !strings.HasPrefix(got, "é") {
 		t.Errorf("long label %d bytes", len(got))
+	}
+}
+
+func TestPairRecoversALostEnrollReplyWithTheSameTokenAndRequest(t *testing.T) {
+	var h *fakeHouse
+	id := func() string { s, _ := h.created["device_request_id"].(string); return s }
+	h, s := newFakeHouse(t, approved(id, nil, "r1"))
+	h.enrollDrops = 1
+	clock := &fakeClock{now: time.Now()}
+	state, err := pairClient(s).Pair(context.Background(), pairRequest(s, clock, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.nEnroll != 2 || h.enrolled["enrollment_token"] != testToken || h.enrolled["device_request_id"] != id() {
+		t.Fatalf("enroll attempts %d, last %v", h.nEnroll, h.enrolled)
+	}
+	if state.DeviceID != "dev1" {
+		t.Fatalf("state %+v", state)
+	}
+}
+
+func TestPairThatNeverHearsBackFromEnrollIsUncertainNotNothing(t *testing.T) {
+	var h *fakeHouse
+	id := func() string { s, _ := h.created["device_request_id"].(string); return s }
+	h, s := newFakeHouse(t, approved(id, nil, "r1"))
+	h.enrollDrops = 100
+	clock := &fakeClock{now: time.Now()}
+	_, err := pairClient(s).Pair(context.Background(), pairRequest(s, clock, nil))
+	if !errors.Is(err, ErrPairUncertain) {
+		t.Fatalf("got %v, want ErrPairUncertain", err)
+	}
+	if h.nEnroll != pairEnrollAttempts {
+		t.Fatalf("enroll attempts %d", h.nEnroll)
 	}
 }

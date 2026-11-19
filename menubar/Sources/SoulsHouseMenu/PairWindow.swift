@@ -13,8 +13,9 @@ final class PairWindow: NSObject, NSWindowDelegate {
     private let window: NSWindow
     private let stack = NSStackView()
     private var boxes: [(volume: PairVolume, button: NSButton)] = []
-    private let access = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let write = NSButton(checkboxWithTitle: "Also let residents change and add files there", target: nil, action: nil)
     private var run: PairingRun?
+    private var stopping = false
     private let contentWidth: CGFloat = 440
 
     init(companion: String, onPaired: @escaping () -> Void) {
@@ -40,7 +41,6 @@ final class PairWindow: NSObject, NSWindowDelegate {
             container.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: 24),
         ])
         window.contentView = container
-        access.addItems(withTitles: ["Read only", "Read and write"])
     }
 
     /// Opens at step 1 (or brings an open window forward).
@@ -58,11 +58,19 @@ final class PairWindow: NSObject, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
-    func windowWillClose(_ notification: Notification) { stop() }
+    /// While `pair` runs, closing means "stop", and the window stays until the
+    /// command says how it ended: once souls.house has approved, it finishes
+    /// pairing even when asked to stop, and that must not happen out of sight.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard run != nil else { return true }
+        stopRun()
+        return false
+    }
 
-    private func stop() {
+    private func stopRun() {
+        stopping = true
         run?.cancel()
-        run = nil
+        show(message: "Stopping… If souls.house has already approved this Mac, it finishes pairing first.", buttons: [])
     }
 
     // MARK: building blocks
@@ -126,19 +134,21 @@ final class PairWindow: NSObject, NSWindowDelegate {
                  buttons: [button("Close", #selector(closeWindow))])
             return
         }
+        // Nothing is ticked and write is off every time: sharing a disk is a
+        // choice made here, not a default.
         boxes = volumes.map { v in
             let b = NSButton(checkboxWithTitle: v.label, target: self, action: #selector(choiceChanged))
-            b.state = v.isMain ? .on : .off
+            b.state = .off
             return (v, b)
         }
-        let accessRow = NSStackView(views: [text("Access:"), access])
-        accessRow.orientation = .horizontal
-        accessRow.spacing = 8
+        write.state = .off
         var views: [NSView] = [title("Pair this Mac with souls.house"),
-                               text("Choose what this Mac can share.")]
+                               text("Tick the disks souls.house's residents may read. A disk means every file on it that your user account can open, not one folder.")]
         views += boxes.map { $0.button }
-        views += [accessRow,
-                  text("souls.house can never reach more than this. You choose which residents get it on the website.",
+        views += [write,
+                  text("Changing files includes the hidden files that run when you log in, so it is as strong as letting them run programs as you. Leave it off unless you mean that.",
+                       secondary: true),
+                  text("souls.house can never reach more than this. On the website you choose which residents get it, and you can narrow it there.",
                        secondary: true),
                   row([button("Cancel", #selector(closeWindow)),
                        button("Get a pairing code", #selector(getCode), primary: true)])]
@@ -158,11 +168,12 @@ final class PairWindow: NSObject, NSWindowDelegate {
 
     @objc private func getCode() {
         let chosen = boxes.filter { $0.button.state == .on }.map {
-            PairChoice(key: $0.volume.key, write: access.indexOfSelectedItem == 1)
+            PairChoice(key: $0.volume.key, write: write.state == .on)
         }
         guard !chosen.isEmpty else { return }
         let args = pairArguments(url: houseURL, name: pairDeviceName(Host.current().localizedName), choices: chosen)
-        show(message: "Getting your pairing code…", buttons: [button("Cancel", #selector(closeWindow))])
+        show(message: "Getting your pairing code…", buttons: [button("Cancel", #selector(cancelRun))])
+        stopping = false
         let next = PairingRun(path: companionPath, args: args)
         run = next
         next.start { [weak self, weak next] state in
@@ -177,6 +188,8 @@ final class PairWindow: NSObject, NSWindowDelegate {
         switch state {
         case .waiting:
             break
+        case .code where stopping:
+            break
         case let .code(code, _):
             let big = NSTextField(labelWithString: code)
             big.font = .monospacedSystemFont(ofSize: 34, weight: .semibold)
@@ -186,15 +199,10 @@ final class PairWindow: NSObject, NSWindowDelegate {
             set([title("Your pairing code"), big,
                  text("Click Open souls.house (or go to Settings → Computers → Add a computer there) and type this code. It works for 15 minutes, once."),
                  row([copy, button("Open souls.house", #selector(openSite))]),
-                 row([button("Cancel", #selector(closeWindow))])])
+                 row([button("Cancel", #selector(cancelRun))])])
         case .paired:
             run = nil
-            show(message: "Paired. Starting the connection…", buttons: [])
-            let path = companionPath
-            DispatchQueue.global().async {
-                let started = runCLI(path, ["resume"], timeout: 40).succeeded
-                DispatchQueue.main.async { self.finishPairing(started) }
-            }
+            startConnection()
         case .expired:
             run = nil
             show(message: "That code ran out of time. A code works for 15 minutes, and nothing was shared.",
@@ -203,6 +211,11 @@ final class PairWindow: NSObject, NSWindowDelegate {
             run = nil
             show(message: "Pairing was cancelled. Nothing was shared.",
                  buttons: [button("Try again", #selector(retry)), button("Close", #selector(closeWindow))])
+        case .uncertain:
+            run = nil
+            show(message: "souls.house may have added this Mac, but its answer never arrived. Open Settings → Computers on souls.house: if this Mac is listed, remove it there, then pair again here.",
+                 buttons: [button("Open souls.house", #selector(openSite)), button("Try again", #selector(retry)),
+                           button("Close", #selector(closeWindow))])
         case let .failed(detail):
             run = nil
             let more = detail.isEmpty ? "" : "\n\n\(detail)"
@@ -211,20 +224,34 @@ final class PairWindow: NSObject, NSWindowDelegate {
         }
     }
 
+    @objc private func startConnection() {
+        show(message: "Paired. Starting the connection…", buttons: [])
+        let path = companionPath
+        DispatchQueue.global().async {
+            let started = runCLI(path, ["resume"], timeout: 40).succeeded
+            DispatchQueue.main.async { self.finishPairing(started) }
+        }
+    }
+
+    /// `resume` succeeding means macOS started the companion, not that it has
+    /// reached souls.house yet; the menu shows the connection as it comes up.
     private func finishPairing(_ started: Bool) {
         onPaired()
         if started {
-            window.close()
+            show(message: "This Mac is paired. The souls.house menu shows when it has connected; on the website it appears under Settings → Computers.",
+                 buttons: [button("Done", #selector(closeWindow), primary: true)])
         } else {
-            show(message: "This Mac is paired, but souls.house couldn't start the connection. Quit souls.house from its menu and open it again.",
-                 buttons: [button("Close", #selector(closeWindow))])
+            show(message: "This Mac is paired, but its connection didn't start.",
+                 buttons: [button("Try again", #selector(startConnection), primary: true), button("Close", #selector(closeWindow))])
         }
     }
 
     // MARK: buttons
 
+    @objc private func cancelRun() { stopRun() }
+
     @objc private func retry() {
-        stop()
+        run = nil
         window.close()
         show()
     }

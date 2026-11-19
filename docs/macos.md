@@ -83,8 +83,13 @@ service: run `resume` afterwards.
   owner adds later needs `policy apply`.
 - `{"event":"expired"}` or `{"event":"cancelled"}` exits 3. Any other failure is one
   line on stderr, exit 1. SIGINT/SIGTERM while waiting exits 130 and writes
-  nothing. Refused up front, with no network call, if `state.json` exists or a
-  volume is unknown or denied.
+  nothing; after the house has approved, a signal lets the short enrollment
+  finish (it reports `paired` or `uncertain`). Refused up front, with no
+  network call, if `state.json` exists or a volume is unknown or denied.
+- A lost `/enroll` reply is retried with the same token and request id (the
+  house answers from its recovery cache with the same device). If no answer
+  ever arrives, or state can't be saved, it prints `{"event":"uncertain"}` and
+  exits 4: the house may list this computer; remove it there and pair again.
 - The poll secret and enrollment token are never printed or logged.
 
 TCC may deny Documents/Desktop/Downloads, removable/network volumes and iCloud.

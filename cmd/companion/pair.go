@@ -52,7 +52,9 @@ func pairFailure(err error) error {
 }
 
 // pairCommand: JSON lines on stdout (the Mac menu reads them), one stderr line
-// and exit 1 on failure, exit 3 for expired/cancelled, 130 for a signal. The
+// and exit 1 on failure, exit 3 for expired/cancelled, exit 4 with
+// {"event":"uncertain"} when the house may have enrolled this device but it
+// never got or kept the answer, 130 for a signal while waiting. The
 // token and poll secret never leave client.Pair.
 func pairCommand(ctx context.Context, dir, base, name string, specs []string, d pairDeps) error {
 	if base == "" || name == "" || len(specs) == 0 {
@@ -83,13 +85,18 @@ func pairCommand(ctx context.Context, dir, base, name string, specs []string, d 
 	case errors.Is(err, client.ErrPairCancelled):
 		_ = enc.Encode(map[string]string{"event": "cancelled"})
 		return &exitError{code: 3}
+	case errors.Is(err, client.ErrPairUncertain):
+		_ = enc.Encode(map[string]string{"event": "uncertain"})
+		return &exitError{code: 4}
 	case err != nil && (errors.Is(err, context.Canceled) || ctx.Err() != nil):
 		return &exitError{code: 130}
 	case err != nil:
 		return pairFailure(err)
 	}
 	if err := client.Save(dir, state); err != nil {
-		return pairFailure(err)
+		// The house has this device now; this Mac doesn't. Say so plainly.
+		_ = enc.Encode(map[string]string{"event": "uncertain"})
+		return &exitError{code: 4, msg: "companion: paired with the house but could not save state: " + err.Error()}
 	}
 	_ = enc.Encode(map[string]string{"event": "paired", "device_id": state.DeviceID})
 	return nil

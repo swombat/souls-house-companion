@@ -30,15 +30,20 @@ var (
 	ErrPairExpired   = errors.New("pairing expired")
 	ErrPairCancelled = errors.New("pairing cancelled")
 	ErrPairNotFound  = errors.New("pairing unknown to the house")
+	// ErrPairUncertain: the house approved and enrollment may have committed,
+	// but this device never got (or couldn't keep) the answer. Not "nothing
+	// happened": the owner should look on the Computers page.
+	ErrPairUncertain = errors.New("pairing may have completed on the house without this device knowing")
 )
 
 const (
-	pairMaxVolumes   = 16
-	pairGrace        = 30 * time.Second // house-side lifetime plus slack for a late approval
-	pairMinInterval  = 2 * time.Second
-	pairMaxInterval  = 30 * time.Second
-	pairMaxLifetime  = 20 * time.Minute // contract says 15; a longer claim is not believed
-	pairEnrollWindow = 35 * time.Second
+	pairMaxVolumes     = 16
+	pairGrace          = 30 * time.Second // house-side lifetime plus slack for a late approval
+	pairMinInterval    = 2 * time.Second
+	pairMaxInterval    = 30 * time.Second
+	pairMaxLifetime    = 20 * time.Minute // contract says 15; a longer claim is not believed
+	pairEnrollAttempts = 4
+	pairEnrollAttempt  = 15 * time.Second
 )
 
 var (
@@ -329,10 +334,36 @@ func (c *Client) finishPair(ctx context.Context, req PairRequest, requestID stri
 		return zero, err
 	}
 	// An interrupt must not strand a token the house has already approved:
-	// the enrollment is short, bounded, and finishes even if the wait was cut.
-	enrollCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pairEnrollWindow)
-	defer cancel()
-	return c.Enroll(enrollCtx, req.URL, requestID, approved.Token, ceiling)
+	// enrollment runs detached from the wait's cancellation, bounded per
+	// attempt. A lost reply is retried with the SAME token and request id,
+	// which the house answers from its recovery cache with the same device.
+	sleep := req.Sleep
+	if sleep == nil {
+		sleep = sleepContext
+	}
+	detached := context.WithoutCancel(ctx)
+	ambiguous := false
+	var lastErr error
+	for attempt := range pairEnrollAttempts {
+		if attempt > 0 {
+			_ = sleep(detached, time.Duration(attempt)*2*time.Second)
+		}
+		attemptCtx, cancel := context.WithTimeout(detached, pairEnrollAttempt)
+		state, err := c.Enroll(attemptCtx, req.URL, requestID, approved.Token, ceiling)
+		cancel()
+		if err == nil {
+			return state, nil
+		}
+		lastErr = err
+		if !errors.Is(err, ErrTransport) {
+			break // a definite refusal: nothing more to recover
+		}
+		ambiguous = true
+	}
+	if ambiguous {
+		return zero, ErrPairUncertain
+	}
+	return zero, lastErr
 }
 
 func pairStatusText(status int) string {
