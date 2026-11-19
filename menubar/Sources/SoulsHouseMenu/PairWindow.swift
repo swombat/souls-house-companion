@@ -184,7 +184,7 @@ final class PairWindow: NSObject, NSWindowDelegate {
             let copy = button("Copy", #selector(copyCode))
             copy.identifier = NSUserInterfaceItemIdentifier(code)
             set([title("Your pairing code"), big,
-                 text("On souls.house, open Settings → Computers → Add a computer, and type this code. It works for 15 minutes."),
+                 text("Click Open souls.house (or go to Settings → Computers → Add a computer there) and type this code. It works for 15 minutes, once."),
                  row([copy, button("Open souls.house", #selector(openSite))]),
                  row([button("Cancel", #selector(closeWindow))])])
         case .paired:
