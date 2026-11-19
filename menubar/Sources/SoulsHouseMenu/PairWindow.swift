@@ -13,7 +13,7 @@ final class PairWindow: NSObject, NSWindowDelegate {
     private let window: NSWindow
     private let stack = NSStackView()
     private var boxes: [(volume: PairVolume, button: NSButton)] = []
-    private let write = NSButton(checkboxWithTitle: "Also let residents change and add files there", target: nil, action: nil)
+    private let write = NSButton(checkboxWithTitle: "Allow editing: residents may also change, add and delete files on the ticked disks", target: nil, action: nil)
     private var run: PairingRun?
     private var stopping = false
     private let contentWidth: CGFloat = 440
@@ -143,10 +143,10 @@ final class PairWindow: NSObject, NSWindowDelegate {
         }
         write.state = .off
         var views: [NSView] = [title("Pair this Mac with souls.house"),
-                               text("Tick the disks souls.house's residents may read. A disk means every file on it that your user account can open, not one folder.")]
+                               text("Tick the disks souls.house's residents may read. A disk means every file on it that your user account can open, not one folder. Usually that is just the main disk.")]
         views += boxes.map { $0.button }
         views += [write,
-                  text("Changing files includes the hidden files that run when you log in, so it is as strong as letting them run programs as you. Leave it off unless you mean that.",
+                  text("Without this they can only read. Editing reaches the hidden files that start programs when you log in, so it is as strong as letting them run programs as you. Leave it off unless you need it.",
                        secondary: true),
                   text("souls.house can never reach more than this. On the website you choose which residents get it, and you can narrow it there.",
                        secondary: true),
