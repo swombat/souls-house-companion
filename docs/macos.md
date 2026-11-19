@@ -2,7 +2,7 @@
 
 Targets macOS 11+ arm64/amd64, built on Linux with Go 1.27.2, CGO_ENABLED=0.
 **Cross-build is not runtime acceptance.** No GUI/Bluetooth/root daemon or
-Apple toolchain is required. Pairing and remote grants remain in souls.house.
+Apple toolchain is required. Remote grants remain in souls.house.
 Current actual-host acceptance is not established; do not call this ready.
 
 ## Installation and trust
@@ -34,6 +34,17 @@ SSH bootstrap failure is reported, not bypassed via the `user/` domain.
 The installed plist can load at the next login.
 
 ## Pairing and permissions
+
+**The usual way, without Terminal:** in the menu bar app, choose
+"Pair this Mac…" (shown while the Mac is not paired yet). Tick the disks to
+offer (the main disk is ticked), choose Read only or Read and write, and press
+"Get a pairing code". The app runs `souls-house-companion pair`, shows the
+code, and the owner types it on souls.house under Settings → Computers → Add a
+computer; the code works for 15 minutes and "Cancel" ends the attempt without
+writing anything. When the house approves, the app resumes the companion and
+the menu updates. What is offered here is only a ceiling: the owner still
+chooses on the website which residents get it. The steps below are the
+command-line route.
 
 1. `souls-house-companion volumes` shows real OS UUID-based identities.
    APFS Data is distinct from sealed System (denied); a `/` grant cannot
