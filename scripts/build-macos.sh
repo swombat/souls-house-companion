@@ -2,8 +2,12 @@
 set -eu
 # Run from repository root in an allowlisted environment. No Apple toolchain.
 out=${1:-dist}
-version=$(git rev-parse --short=12 HEAD)
-if test -n "$(git status --porcelain)"; then version="$version-dirty"; fi
+# Releases pass their tag (v0.4.2), which the Mac app compares when updating.
+version=${2:-}
+if test -z "$version"; then
+  version=$(git rev-parse --short=12 HEAD)
+  if test -n "$(git status --porcelain)"; then version="$version-dirty"; fi
+fi
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 for arch in arm64 amd64; do

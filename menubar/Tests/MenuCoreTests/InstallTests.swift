@@ -91,15 +91,134 @@ final class InstallTests: XCTestCase {
         XCTAssertFalse(calls().contains { $0.contains("pause") || $0.contains("install") })
     }
 
-    func testADifferentInstalledCompanionIsLeftExactlyAsItIs() throws {
-        try fake(at: paths.bundled, version: "v2")
-        try fake(at: paths.installed, version: "v1", status: #"{"enrolled":true,"paused":false}"#)
+    func testANewerInstalledCompanionIsLeftExactlyAsItIs() throws {
+        try fake(at: paths.bundled, version: "v0.4.1")
+        try fake(at: paths.installed, version: "v0.5.0", status: #"{"enrolled":true,"paused":false}"#)
         let before = try Data(contentsOf: URL(fileURLWithPath: paths.installed))
-        XCTAssertEqual(ensure(), .existingInstall(version: "v1"))
+        XCTAssertEqual(ensure(), .existingInstall(version: "v0.5.0"))
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.installed)), before)
-        XCTAssertEqual(calls().filter { $0.hasPrefix("v1") }, ["v1 version"], "only asked its version")
+        XCTAssertEqual(calls().filter { $0.hasPrefix("v0.5.0") }, ["v0.5.0 version"], "only asked its version")
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.launchAgent))
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.installed + ".previous"))
+    }
+
+    func testAnUnversionedInstalledCompanionIsLeftAlone() throws {
+        try fake(at: paths.bundled, version: "v0.4.1")
+        try fake(at: paths.installed, version: "development")
+        XCTAssertEqual(ensure(), .existingInstall(version: "development"))
+        XCTAssertEqual(installedVersion(), "development")
+    }
+
+    /// Daniel's Mac, 20 Nov: v0.4.0 installed and paired, v0.4.1 opened.
+    func testAnOlderReleaseIsUpdatedKeepingItsPairing() throws {
+        try fake(at: paths.bundled, version: "v0.4.1")
+        try fake(at: paths.installed, version: "v0.4.0", status: #"{"enrolled":true,"paused":false}"#)
+        try put(validPlist(), at: paths.launchAgent)
+        try put(#"{"device_id":"d1"}"#, at: paths.state)
+        let plistBefore = try Data(contentsOf: URL(fileURLWithPath: paths.launchAgent))
+        let legacy = dir.appendingPathComponent("home/LaunchAgents/house.souls.menu.plist").path
+        XCTAssertFalse(earlierSetup(paths, legacyMenuAgent: legacy) { runCLI($0, $1, timeout: 5) })
+        XCTAssertEqual(ensure(), .updated(from: "v0.4.0", to: "v0.4.1"))
+        XCTAssertEqual(installedVersion(), "v0.4.1")
+        XCTAssertEqual(versionOf(paths.installed + ".previous") { runCLI($0, $1, timeout: 5) }, "v0.4.0")
+        XCTAssertEqual(try String(contentsOfFile: paths.state, encoding: .utf8), #"{"device_id":"d1"}"#)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.launchAgent)), plistBefore)
+        XCTAssertFalse(calls().contains { $0.contains("install") || $0.contains("pause") })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.installed + ".staging"))
+        XCTAssertEqual(ensure(), .upToDate, "second launch")
+    }
+
+    func testABrokenUpdatePutsTheEarlierCompanionBack() throws {
+        try fake(at: paths.bundled, version: "v0.4.1")
+        try fake(at: paths.installed, version: "v0.4.0")
+        // The bundled copy answers from inside the app but not once installed:
+        // simulate by making `version` fail when run from the installed path.
+        let body = try String(contentsOfFile: paths.bundled, encoding: .utf8)
+            .replacingOccurrences(of: "case \"$1\" in",
+                                  with: "[ \"$0\" = '\(paths.installed)' ] && exit 1\ncase \"$1\" in")
+        try body.write(toFile: paths.bundled, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: paths.bundled)
+        XCTAssertEqual(ensure(), .failed("The updated companion didn't answer; the earlier one was put back"))
+        XCTAssertEqual(installedVersion(), "v0.4.0")
+        XCTAssertEqual(versionOf(paths.installed + ".previous") { runCLI($0, $1, timeout: 5) }, "v0.4.0",
+                       "recovery copy kept")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.installed + ".restore"))
+    }
+
+    func testReleaseOrdering() {
+        XCTAssertTrue(isUpgrade(from: "v0.4.0", to: "v0.4.1"))
+        XCTAssertTrue(isUpgrade(from: "v0.9.9", to: "v0.10.0"))
+        XCTAssertFalse(isUpgrade(from: "v0.4.1", to: "v0.4.1"))
+        XCTAssertFalse(isUpgrade(from: "v0.5.0", to: "v0.4.1"))
+        XCTAssertFalse(isUpgrade(from: "development", to: "v0.4.1"))
+        XCTAssertFalse(isUpgrade(from: "v0.4.0", to: "dev-abc1234"))
+        // What the signed v0.3.0, v0.4.0 and v0.4.1 companions actually print.
+        XCTAssertTrue(isUpgrade(from: "da40108395bb", to: "v0.4.2"))
+        XCTAssertTrue(isUpgrade(from: "ad70d2ecb977", to: "v0.4.2"))
+        XCTAssertTrue(isUpgrade(from: "92d1e67d0545", to: "v0.4.2"))
+        XCTAssertFalse(isUpgrade(from: "92d1e67d0545", to: "v0.4.1"), "same release")
+        XCTAssertFalse(isUpgrade(from: "0123456789ab", to: "v0.4.2"), "unknown revision")
+        XCTAssertFalse(isUpgrade(from: "ad70d2ecb977-dirty", to: "v0.4.2"))
+    }
+
+    /// The signed v0.4.0 as shipped: it prints its revision, not its tag.
+    func testTheShippedV040IsUpdated() throws {
+        try fake(at: paths.bundled, version: "v0.4.2")
+        try fake(at: paths.installed, version: "ad70d2ecb977", status: #"{"enrolled":true,"paused":false}"#)
+        try put(validPlist(), at: paths.launchAgent)
+        XCTAssertEqual(ensure(), .updated(from: "ad70d2ecb977", to: "v0.4.2"))
+        XCTAssertEqual(installedVersion(), "v0.4.2")
+    }
+
+    func testAnUnknownRevisionIsLeftAlone() throws {
+        try fake(at: paths.bundled, version: "v0.4.2")
+        try fake(at: paths.installed, version: "0123456789ab")
+        XCTAssertEqual(ensure(), .existingInstall(version: "0123456789ab"))
+        XCTAssertEqual(installedVersion(), "0123456789ab")
+    }
+
+    // restartAfterUpdate against a scripted launchctl.
+    func launchctl(_ replies: [CLIResult]) -> ((String, [String]) -> CLIResult, () -> [[String]]) {
+        var queue = replies, seen: [[String]] = []
+        return ({ _, args in
+            seen.append(args)
+            return queue.isEmpty ? CLIResult(outcome: .exited(1), output: Data(), truncated: false) : queue.removeFirst()
+        }, { seen })
+    }
+    func printed(_ pid: String?) -> CLIResult {
+        let body = pid.map { "state = running\n\tpid = \($0)\n" } ?? "state = not running\n"
+        return CLIResult(outcome: .exited(0), output: Data(body.utf8), truncated: false)
+    }
+    let ok = CLIResult(outcome: .exited(0), output: Data(), truncated: false)
+
+    func testRestartNotNeededWhenTheJobIsAbsent() {
+        let (run, seen) = launchctl([CLIResult(outcome: .exited(113), output: Data(), truncated: false)])
+        XCTAssertNil(restartAfterUpdate(job: "gui/501/x", run: run))
+        XCTAssertEqual(seen().map { $0[0] }, ["print"], "no kickstart")
+    }
+
+    func testAnIdleJobIsNotRestarted() {
+        let (run, seen) = launchctl([printed(nil)])
+        XCTAssertNil(restartAfterUpdate(job: "gui/501/x", run: run))
+        XCTAssertEqual(seen().map { $0[0] }, ["print"], "no kickstart, no warning")
+    }
+
+    func testRestartIsVerifiedByANewPid() {
+        let (run, seen) = launchctl([printed("100"), ok, printed("100"), printed("200")])
+        XCTAssertNil(restartAfterUpdate(job: "gui/501/x", run: run))
+        XCTAssertEqual(seen().map { $0[0] }, ["print", "kickstart", "print", "print"])
+    }
+
+    func testALookupFailureIsNotTakenForAbsence() {
+        let (run, _) = launchctl([CLIResult(outcome: .exited(5), output: Data(), truncated: false)])
+        XCTAssertEqual(restartAfterUpdate(job: "gui/501/x", run: run),
+                       "Updated, but couldn't check whether the companion is running")
+    }
+
+    func testAKickstartThatSucceedsButNeverRunsIsReported() {
+        let (run, _) = launchctl([printed("100"), ok] + Array(repeating: printed(nil), count: 10))
+        XCTAssertEqual(restartAfterUpdate(job: "gui/501/x", run: run),
+                       "Updated, but the companion didn't come back running; log out and in to finish")
     }
 
     func testAnInstalledCompanionThatDoesntAnswerIsLeftAlone() throws {
@@ -120,8 +239,8 @@ final class InstallTests: XCTestCase {
         XCTAssertTrue(earlierSetup(paths, legacyMenuAgent: legacy, run: run), "old menu agent")
         try FileManager.default.removeItem(atPath: legacy)
         try FileManager.default.removeItem(atPath: paths.installed)
-        try fake(at: paths.installed, version: "v1")
-        XCTAssertTrue(earlierSetup(paths, legacyMenuAgent: legacy, run: run), "other companion")
+        try fake(at: paths.installed, version: "v1", fail: ["version"])
+        XCTAssertTrue(earlierSetup(paths, legacyMenuAgent: legacy, run: run), "companion that doesn't answer")
     }
 
     func testSymlinkedInstallIsRefused() throws {

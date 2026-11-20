@@ -108,6 +108,11 @@ final class Menu: NSObject, NSMenuDelegate {
                 // Only right after a fresh install; afterwards the owner's choice stands.
                 if let failed = LoginItem.set(true) { notes.append(failed) }
             }
+            if case .updated = outcome,
+               let failed = restartAfterUpdate(job: "gui/\(getuid())/house.souls.companion",
+                                               run: { runCLI($0, $1, timeout: 20) }) {
+                notes.append(failed)
+            }
             DispatchQueue.main.async { self.installNote = notes.isEmpty ? nil : notes.joined(separator: " · ") }
             if case .failed = outcome { return false }
             return true
