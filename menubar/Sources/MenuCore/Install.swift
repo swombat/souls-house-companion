@@ -180,9 +180,11 @@ func update(_ paths: CompanionInstall, from old: String, to new: String,
         return .failed("Couldn't update the companion")
     }
     guard versionOf(target, run) == new else {
-        // Put the old binary back by linking, so `.previous` stays as a
-        // recovery copy whatever happens here.
-        let restored = unlink(target) == 0 && link(previous, target) == 0
+        // Put the old binary back atomically (a second link to it, renamed
+        // over the path), so `.previous` stays as a recovery copy.
+        let restoring = target + ".restore"
+        _ = unlink(restoring)
+        let restored = link(previous, restoring) == 0 && rename(restoring, target) == 0
             && versionOf(target, run) == old
         return .failed(restored
             ? "The updated companion didn't answer; the earlier one was put back"
@@ -243,7 +245,8 @@ func runningPID(_ printed: Data) -> String? {
 
 /// After an update, restarts the companion's launchd job so the new binary
 /// runs. Returns nil when there was nothing to restart (launchd reports the
-/// job absent: never loaded) or when a new process is seen running; otherwise
+/// job absent, or loaded but not running) or when a new process is seen
+/// running; otherwise
 /// a line for the menu. Exit 113 is launchctl's "could not find service";
 /// any other failure to look is reported, not taken for absence.
 public func restartAfterUpdate(job: String, run: (String, [String]) -> CLIResult) -> String? {
@@ -251,7 +254,8 @@ public func restartAfterUpdate(job: String, run: (String, [String]) -> CLIResult
     let before = run(launchctl, ["print", job])
     if before.outcome == .exited(113) { return nil }
     guard before.succeeded else { return "Updated, but couldn't check whether the companion is running" }
-    let oldPID = runningPID(before.output)
+    // Registered but idle (an unpaired Mac): the next start runs the new binary.
+    guard let oldPID = runningPID(before.output) else { return nil }
     guard run(launchctl, ["kickstart", "-k", job]).succeeded else {
         return "Updated, but couldn't restart the companion; log out and in to finish"
     }

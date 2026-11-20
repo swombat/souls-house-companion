@@ -140,6 +140,9 @@ final class InstallTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: paths.bundled)
         XCTAssertEqual(ensure(), .failed("The updated companion didn't answer; the earlier one was put back"))
         XCTAssertEqual(installedVersion(), "v0.4.0")
+        XCTAssertEqual(versionOf(paths.installed + ".previous") { runCLI($0, $1, timeout: 5) }, "v0.4.0",
+                       "recovery copy kept")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.installed + ".restore"))
     }
 
     func testReleaseOrdering() {
@@ -192,6 +195,12 @@ final class InstallTests: XCTestCase {
         let (run, seen) = launchctl([CLIResult(outcome: .exited(113), output: Data(), truncated: false)])
         XCTAssertNil(restartAfterUpdate(job: "gui/501/x", run: run))
         XCTAssertEqual(seen().map { $0[0] }, ["print"], "no kickstart")
+    }
+
+    func testAnIdleJobIsNotRestarted() {
+        let (run, seen) = launchctl([printed(nil)])
+        XCTAssertNil(restartAfterUpdate(job: "gui/501/x", run: run))
+        XCTAssertEqual(seen().map { $0[0] }, ["print"], "no kickstart, no warning")
     }
 
     func testRestartIsVerifiedByANewPid() {
