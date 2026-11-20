@@ -80,8 +80,9 @@ is always saved **paused** (also across login) and nothing is shared until
 `resume`; the Mac window runs it unless you stopped the pairing.
 
 - The local ceiling is exactly what this device offered, for each approved
-  resident, without execute; the house can only grant within it. A resident the
-  owner adds later needs `policy apply`.
+  resident, with `execute` false; the house can only grant within it. A resident
+  the owner adds later needs `policy apply`. On macOS the **Let residents run commands on this Mac**
+  switch writes that flag (see below).
 - `{"event":"expired"}` or `{"event":"cancelled"}` exits 3. Any other failure is one
   line on stderr, exit 1. SIGINT/SIGTERM while waiting exits 130 and writes
   nothing; after the house has approved, a signal lets the short enrollment
@@ -139,6 +140,17 @@ process names into audit logs.
 Without this exact per-install local opt-in, execute is refused before input
 download; read/write remain available.
 
+On macOS, accepting writes `execute: true` into the local ceiling for every
+resident already in it, and revoking writes `execute: false`; `policy show`
+displays the result. Pairing writes `execute: false` and the menu app has no
+per-resident control, so before v0.4.4 the switch could never allow a command.
+Installing an update changes nothing: a Mac that accepted under an older build
+keeps its stored flags until the switch is turned off and on again. The house's
+per-resident grant still narrows it, a resident not in the local ceiling never
+gains execute, and a narrower ceiling applied with `policy apply` after turning
+it on stays in force until the switch is next turned on. On Linux the lifecycle
+never touches the flag.
+
 The menu bar app's **Let residents run commands on this Mac** item does this
 without Terminal. Turning it on asks once, at the Mac, what the contract
 means, then pauses the companion, accepts the contract the companion itself
@@ -160,6 +172,13 @@ souls-house-companion pause
 souls-house-companion execute-lifecycle --accept-contract darwin-process-group-preview-v1-not-proven-for-setsid-double-fork
 souls-house-companion resume
 ```
+
+That Terminal recipe accepts the lifecycle only: every paired resident keeps
+the local execute flag it had (pairing writes it off), so it grants nobody
+commands. The menu switch passes `--paired-residents` after the owner confirms,
+which also sets execute on for every resident paired to this Mac, and with
+`--revoke` sets it off again. Add the flag yourself only if that is what you
+mean.
 
 A changed contract ID requires fresh acceptance. Local status and every remote
 execute receipt identify the weaker lifecycle. House's generic execute boolean

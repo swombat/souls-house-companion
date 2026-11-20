@@ -84,6 +84,7 @@ func run(args []string) error {
 	user := flags.Bool("user", false, "install ordinary user unit only")
 	contract := flags.String("accept-contract", "", "explicit local acceptance of versioned execute lifecycle; see docs/macos.md")
 	revokeContract := flags.Bool("revoke", false, "revoke local execute lifecycle acceptance (pause first)")
+	pairedResidents := flags.Bool("paired-residents", false, "execute-lifecycle (macOS): also set the local execute flag for every paired resident, on with --accept-contract, off with --revoke; the menu passes this after the owner confirms")
 	requestAccessibility := flags.Bool("request", false, "accessibility: ask the running service to request macOS Accessibility")
 	_ = flags.Bool("json", false, "machine-readable status")
 	pairName := flags.String("name", "", "pair: name shown to the house owner")
@@ -144,7 +145,21 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		if *pairedResidents && !switchWritesLocalExecute {
+			return errors.New("--paired-residents is macOS only; use policy apply")
+		}
 		state.ExecuteLifecycle = *contract // --revoke leaves this empty
+		// Only with --paired-residents does the lifecycle touch the local
+		// ceiling: the menu passes it after the owner confirms "Let residents
+		// run commands on this Mac", and then accepting writes execute for
+		// each paired resident (where `policy show` displays it) and revoking
+		// writes it back. Without the flag this command does what it always
+		// did, so an old Terminal recipe grants nobody commands. Pairing
+		// writes execute false and the Mac app has no per-resident control,
+		// so without the menu's flag the switch could never allow a command.
+		if *pairedResidents {
+			state.Ceiling = withLocalExecute(state.Ceiling, *contract != "")
+		}
 		return client.Save(*dir, state)
 	case "uninstall":
 		if !*user {

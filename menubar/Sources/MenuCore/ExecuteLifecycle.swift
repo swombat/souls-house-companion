@@ -111,7 +111,10 @@ public func setExecuteLifecycle(allow: Bool, resumeOwed: Bool = false,
     }
     // Only a pause this menu made is undone afterwards.
     let resumeAfter = wasRunning || resumeOwed
-    _ = run(allow ? ["execute-lifecycle", "--accept-contract", contract] : ["execute-lifecycle", "--revoke"])
+    // --paired-residents: the owner's confirmation in this menu is what sets
+    // (or clears) commands for the residents paired to this Mac.
+    _ = run(allow ? ["execute-lifecycle", "--accept-contract", contract, "--paired-residents"]
+                  : ["execute-lifecycle", "--revoke", "--paired-residents"])
     let accepted = readAccepted(run)
     let confirmed: Bool
     if allow {

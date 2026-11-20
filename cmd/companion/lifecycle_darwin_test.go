@@ -4,10 +4,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"github.com/swombat/souls-house-companion/internal/client"
+	"github.com/swombat/souls-house-companion/internal/policy"
 	"github.com/swombat/souls-house-companion/internal/runner"
+	"github.com/swombat/souls-house-companion/internal/service"
 	"io"
 	"os"
 	"path/filepath"
@@ -107,5 +110,91 @@ func TestDarwinOwnerDisabledParsing(t *testing.T) {
 	}
 	if _, err := ownerDisabled([]byte("unknown output")); err == nil {
 		t.Fatal("unknown output reported enabled")
+	}
+}
+
+// The Mac switch, end to end: the stored ceiling after each CLI act, judged by
+// the same handler gate that runs commands.
+func TestDarwinRunCommandsSwitchWritesLocalExecute(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	paired := policy.Policy{Residents: []policy.Resident{
+		{ID: "claude", Volumes: []policy.Grant{{Volume: "v", Access: policy.Write}}},
+		{ID: "chris", Volumes: []policy.Grant{{Volume: "v", Access: policy.Write}}},
+	}}
+	house := policy.Policy{Residents: []policy.Resident{
+		{ID: "claude", Volumes: []policy.Grant{}, Execute: true},
+		{ID: "chris", Volumes: []policy.Grant{}, Execute: false},
+		{ID: "stranger", Volumes: []policy.Grant{}, Execute: true},
+	}}
+	allowed := func(id string) bool {
+		state, err := client.Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := &service.Handler{ExecuteLifecycle: state.ExecuteLifecycle}
+		r := client.Request{ResidentID: id, Operation: "execute", Arguments: json.RawMessage(`{}`), Policy: house}
+		return h.AuthorizeInput(r, state.Ceiling) == nil
+	}
+
+	// Upgrade: a Mac that accepted under the old build keeps its stored
+	// execute:false. Installing this build alone allows nothing.
+	if err := client.Save(dir, client.State{ExecuteLifecycle: runner.Lifecycle, Ceiling: paired}); err != nil {
+		t.Fatal(err)
+	}
+	if allowed("claude") {
+		t.Fatal("upgrade alone allowed commands")
+	}
+
+	// The old Terminal recipe, without --paired-residents, accepts the
+	// lifecycle exactly as before and grants nobody commands.
+	if err := run([]string{"execute-lifecycle", "--accept-contract", runner.Lifecycle, "--state-dir", dir}); err != nil {
+		t.Fatal(err)
+	}
+	if allowed("claude") {
+		t.Fatal("old accept command granted commands without the menu's confirmation")
+	}
+	if state, _ := client.Load(dir); state.ExecuteLifecycle != runner.Lifecycle {
+		t.Fatal("old accept command no longer accepts the lifecycle")
+	}
+
+	// Fresh opt-in: turning the switch on in the menu.
+	if err := run([]string{"execute-lifecycle", "--accept-contract", runner.Lifecycle, "--paired-residents", "--state-dir", dir}); err != nil {
+		t.Fatal(err)
+	}
+	if !allowed("claude") {
+		t.Fatal("switch on + house grant denied")
+	}
+	if allowed("chris") {
+		t.Fatal("absent house grant allowed")
+	}
+	if allowed("stranger") {
+		t.Fatal("resident absent from the local ceiling allowed")
+	}
+
+	// An explicit local deny written after the opt-in stays in force.
+	state, _ := client.Load(dir)
+	state.Ceiling.Residents[0].Execute = false
+	if err := client.Save(dir, state); err != nil {
+		t.Fatal(err)
+	}
+	if allowed("claude") {
+		t.Fatal("explicit local deny ignored")
+	}
+
+	// Switch off takes it back from everyone.
+	if err := run([]string{"execute-lifecycle", "--accept-contract", runner.Lifecycle, "--paired-residents", "--state-dir", dir}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"execute-lifecycle", "--revoke", "--paired-residents", "--state-dir", dir}); err != nil {
+		t.Fatal(err)
+	}
+	if allowed("claude") {
+		t.Fatal("switch off left commands allowed")
+	}
+	state, _ = client.Load(dir)
+	for _, r := range state.Ceiling.Residents {
+		if r.Execute || len(r.Volumes) != 1 {
+			t.Fatalf("revoke left %s with execute or changed volumes", r.ID)
+		}
 	}
 }

@@ -127,7 +127,7 @@ final class MenuCoreTests: XCTestCase {
         let f = FakeCompanion(paused: false)
         XCTAssertEqual(setExecuteLifecycle(allow: true, run: f.run), .done)
         XCTAssertEqual(f.calls.map { $0.first! }, ["status", "pause", "execute-lifecycle", "status", "resume"])
-        XCTAssertEqual(f.calls[2], ["execute-lifecycle", "--accept-contract", f.contract])
+        XCTAssertEqual(f.calls[2], ["execute-lifecycle", "--accept-contract", f.contract, "--paired-residents"])
         XCTAssertEqual(f.accepted, f.contract)
         XCTAssertEqual(f.paused, false)
     }
@@ -160,7 +160,7 @@ final class MenuCoreTests: XCTestCase {
     func testRevokeConfirmedResumes() {
         let f = FakeCompanion(paused: false, accepted: "darwin-process-group-preview-v1")
         XCTAssertEqual(setExecuteLifecycle(allow: false, run: f.run), .done)
-        XCTAssertEqual(f.calls[2], ["execute-lifecycle", "--revoke"])
+        XCTAssertEqual(f.calls[2], ["execute-lifecycle", "--revoke", "--paired-residents"])
         XCTAssertEqual(f.accepted, "")
         XCTAssertEqual(f.paused, false)
     }
