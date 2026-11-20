@@ -1,9 +1,12 @@
 package main
 
 import (
+	"path/filepath"
 	"testing"
 
+	"github.com/swombat/souls-house-companion/internal/client"
 	"github.com/swombat/souls-house-companion/internal/policy"
+	"github.com/swombat/souls-house-companion/internal/runner"
 )
 
 func pairedCeiling() policy.Policy {
@@ -40,5 +43,22 @@ func TestWithLocalExecuteAllowsOnlyResidentsAlreadyInTheCeiling(t *testing.T) {
 	}
 	if policy.AllowsExecute(withLocalExecute(on, false), house, "claude") {
 		t.Fatal("switch off did not take execute back")
+	}
+}
+
+func TestPairedResidentsFlagRefusedOffMac(t *testing.T) {
+	if switchWritesLocalExecute {
+		t.Skip("macOS: covered by TestDarwinRunCommandsSwitchWritesLocalExecute")
+	}
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := client.Save(dir, client.State{}); err != nil {
+		t.Fatal(err)
+	}
+	err := run([]string{"execute-lifecycle", "--accept-contract", runner.Lifecycle, "--paired-residents", "--state-dir", dir})
+	if err == nil {
+		t.Fatal("--paired-residents accepted off macOS")
+	}
+	if state, _ := client.Load(dir); state.ExecuteLifecycle != "" {
+		t.Fatal("refused command still accepted the lifecycle")
 	}
 }

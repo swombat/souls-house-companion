@@ -145,8 +145,20 @@ func TestDarwinRunCommandsSwitchWritesLocalExecute(t *testing.T) {
 		t.Fatal("upgrade alone allowed commands")
 	}
 
-	// Fresh opt-in: turning the switch on.
+	// The old Terminal recipe, without --paired-residents, accepts the
+	// lifecycle exactly as before and grants nobody commands.
 	if err := run([]string{"execute-lifecycle", "--accept-contract", runner.Lifecycle, "--state-dir", dir}); err != nil {
+		t.Fatal(err)
+	}
+	if allowed("claude") {
+		t.Fatal("old accept command granted commands without the menu's confirmation")
+	}
+	if state, _ := client.Load(dir); state.ExecuteLifecycle != runner.Lifecycle {
+		t.Fatal("old accept command no longer accepts the lifecycle")
+	}
+
+	// Fresh opt-in: turning the switch on in the menu.
+	if err := run([]string{"execute-lifecycle", "--accept-contract", runner.Lifecycle, "--paired-residents", "--state-dir", dir}); err != nil {
 		t.Fatal(err)
 	}
 	if !allowed("claude") {
@@ -170,10 +182,10 @@ func TestDarwinRunCommandsSwitchWritesLocalExecute(t *testing.T) {
 	}
 
 	// Switch off takes it back from everyone.
-	if err := run([]string{"execute-lifecycle", "--accept-contract", runner.Lifecycle, "--state-dir", dir}); err != nil {
+	if err := run([]string{"execute-lifecycle", "--accept-contract", runner.Lifecycle, "--paired-residents", "--state-dir", dir}); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"execute-lifecycle", "--revoke", "--state-dir", dir}); err != nil {
+	if err := run([]string{"execute-lifecycle", "--revoke", "--paired-residents", "--state-dir", dir}); err != nil {
 		t.Fatal(err)
 	}
 	if allowed("claude") {

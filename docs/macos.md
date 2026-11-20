@@ -173,6 +173,13 @@ souls-house-companion execute-lifecycle --accept-contract darwin-process-group-p
 souls-house-companion resume
 ```
 
+That Terminal recipe accepts the lifecycle only: every paired resident keeps
+the local execute flag it had (pairing writes it off), so it grants nobody
+commands. The menu switch passes `--paired-residents` after the owner confirms,
+which also sets execute on for every resident paired to this Mac, and with
+`--revoke` sets it off again. Add the flag yourself only if that is what you
+mean.
+
 A changed contract ID requires fresh acceptance. Local status and every remote
 execute receipt identify the weaker lifecycle. House's generic execute boolean
 is authority, **not a platform cleanup promise**. This is a reviewed preview
