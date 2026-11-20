@@ -2,8 +2,8 @@
 // app in it, and the rest (the companion, its LaunchAgent, opening at login)
 // is done here after one question, so nobody needs Terminal.
 //
-// This release installs fresh only. A Mac set up by an earlier release is
-// left exactly as it is; updating one gets its own, separately reviewed path.
+// A fresh Mac is set up; a Mac on an older release has its companion updated
+// in place (pairing kept). Only a setup this app can't read is left alone.
 import AppKit
 import MenuCore
 import ServiceManagement
@@ -37,13 +37,14 @@ func mustBeInApplications() -> Bool {
     return true
 }
 
-/// A Mac set up by an earlier release keeps its working setup untouched.
+/// A setup this app can't safely update (the old menu's login job, files
+/// without a companion, a companion that doesn't answer) is left untouched.
 func mustLeaveEarlierSetup() -> Bool {
     guard earlierSetup(install, legacyMenuAgent: legacyMenuAgent, run: { runCLI($0, $1, timeout: 15) }) else {
         return false
     }
     tell("souls.house is already set up on this Mac",
-         "It was set up by an earlier version, which keeps working as it is. This version only sets up Macs that don't have it yet; updating comes in the next version.")
+         "It was set up by a version this one can't update safely, so nothing has been changed. Post a photo of this box in souls.house and a resident will help.")
     return true
 }
 

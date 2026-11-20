@@ -42,8 +42,11 @@ public struct CompanionInstall {
 public enum InstallOutcome: Equatable {
     case upToDate
     case installed(version: String)
-    /// A different companion is already installed. This release only installs
-    /// fresh: it leaves an existing installation exactly as it is.
+    /// An older companion was replaced by the one this app carries. Its
+    /// enrollment and LaunchAgent are kept; the caller restarts the service.
+    case updated(from: String, to: String)
+    /// A companion this app won't replace: a newer one, or one that doesn't
+    /// answer. It is left exactly as it is.
     case existingInstall(version: String?)
     /// No companion, but an earlier setup's login job or enrollment remains.
     case leftovers
@@ -54,7 +57,8 @@ public enum InstallOutcome: Equatable {
         switch self {
         case .upToDate: return nil
         case let .installed(v): return "Companion installed (\(v))"
-        case .existingInstall: return "An earlier companion is installed; left as it is"
+        case let .updated(_, to): return "Companion updated to \(to)"
+        case .existingInstall: return "A different companion is installed; left as it is"
         case .leftovers: return "An earlier setup's files remain; nothing installed"
         case let .failed(why): return why
         }
@@ -80,15 +84,32 @@ func isSymlink(_ path: String) -> Bool {
     ((try? FileManager.default.attributesOfItem(atPath: path))?[.type] as? FileAttributeType) == .typeSymbolicLink
 }
 
-/// Fresh installs only (updates come in a later release, with their own
-/// review). When nothing is installed: copy the companion this app carries
-/// next to its destination, publish it with a hard link (which refuses a
-/// target that appeared meanwhile, so nothing is ever overwritten), then
-/// `install --user`: configuration only, not enrolled or started.
+/// Release versions ("v0.4.1") as numbers; nil for anything else
+/// ("development", "dev-abc1234"), which is never compared.
+func releaseNumbers(_ v: String) -> [Int]? {
+    guard v.hasPrefix("v") else { return nil }
+    let parts = v.dropFirst().split(separator: ".", omittingEmptySubsequences: false).map { Int($0) }
+    guard parts.count == 3, parts.allSatisfy({ $0 != nil }) else { return nil }
+    return parts.map { $0! }
+}
+
+/// True only when both are release versions and `bundled` is newer.
+public func isUpgrade(from installed: String, to bundled: String) -> Bool {
+    guard let a = releaseNumbers(installed), let b = releaseNumbers(bundled) else { return false }
+    return a.lexicographicallyPrecedes(b)
+}
+
+/// When nothing is installed: copy the companion this app carries next to
+/// its destination, publish it with a hard link (which refuses a target that
+/// appeared meanwhile), then `install --user`: configuration only, not
+/// enrolled or started.
 ///
 /// When the same version is installed, only a missing LaunchAgent is written.
-/// When anything else is there (another version, or a companion that doesn't
-/// answer), nothing is touched and `.existingInstall` says so.
+/// When an older release is installed, it is replaced by renaming the new
+/// copy over it (the old binary is kept as `.previous`); enrollment and
+/// LaunchAgent stay, and `.updated` tells the caller to restart the service.
+/// When anything else is there (a newer or unversioned companion, or one that
+/// doesn't answer), nothing is touched and `.existingInstall` says so.
 public func ensureCompanion(_ paths: CompanionInstall,
                             run: (String, [String]) -> CLIResult) -> InstallOutcome {
     let fm = FileManager.default
@@ -102,8 +123,11 @@ public func ensureCompanion(_ paths: CompanionInstall,
     }
     if !paths.needsFirstInstall {
         let installed = versionOf(target, run)
-        guard installed == bundledVersion else { return .existingInstall(version: installed) }
-        return configure(paths, run) ?? .upToDate
+        if installed == bundledVersion { return configure(paths, run) ?? .upToDate }
+        guard let old = installed, isUpgrade(from: old, to: bundledVersion) else {
+            return .existingInstall(version: installed)
+        }
+        return update(paths, from: old, to: bundledVersion, run)
     }
     if paths.leftovers { return .leftovers }
     let staging = target + ".staging"
@@ -122,6 +146,34 @@ public func ensureCompanion(_ paths: CompanionInstall,
         return .failed("The installed companion didn't answer after copying")
     }
     return configure(paths, run) ?? .installed(version: bundledVersion)
+}
+
+/// Replaces an older installed companion with the bundled one. The new copy
+/// is staged beside it and renamed over it, so the path always holds a whole
+/// binary; the old one is kept as `.previous` and put back if the new one
+/// doesn't answer.
+func update(_ paths: CompanionInstall, from old: String, to new: String,
+            _ run: (String, [String]) -> CLIResult) -> InstallOutcome {
+    let fm = FileManager.default
+    let target = paths.installed
+    let staging = target + ".staging"
+    let previous = target + ".previous"
+    do {
+        if (try? fm.attributesOfItem(atPath: staging)) != nil { try fm.removeItem(atPath: staging) }
+        try fm.copyItem(atPath: paths.bundled, toPath: staging)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: staging)
+        if (try? fm.attributesOfItem(atPath: previous)) != nil { try fm.removeItem(atPath: previous) }
+        try fm.linkItem(atPath: target, toPath: previous)
+        guard rename(staging, target) == 0 else { throw CocoaError(.fileWriteUnknown) }
+    } catch {
+        try? fm.removeItem(atPath: staging)
+        return .failed("Couldn't update the companion")
+    }
+    guard versionOf(target, run) == new else {
+        _ = rename(previous, target)
+        return .failed("The updated companion didn't answer; the earlier one was put back")
+    }
+    return configure(paths, run) ?? .updated(from: old, to: new)
 }
 
 /// Writes the companion's LaunchAgent when it is missing. Returns a failure,
@@ -151,13 +203,14 @@ func launchAgentValid(_ paths: CompanionInstall) -> Bool {
     return true
 }
 
-/// True when this Mac was set up by an earlier release (or by hand): a
-/// companion this app didn't put there, or the old menu's LaunchAgent. This
-/// release then changes nothing and says so.
+/// True when this Mac was set up in a way this app won't touch: the old
+/// menu's LaunchAgent, leftovers without a binary, or a companion that
+/// doesn't answer. An older release is not one of these: it gets updated.
+/// A newer one isn't either: it is left alone and the menu says so.
 public func earlierSetup(_ paths: CompanionInstall, legacyMenuAgent: String,
                          run: (String, [String]) -> CLIResult) -> Bool {
     if (try? FileManager.default.attributesOfItem(atPath: legacyMenuAgent)) != nil { return true }
     if paths.needsFirstInstall { return paths.leftovers }
-    guard let bundled = versionOf(paths.bundled, run) else { return true }
-    return versionOf(paths.installed, run) != bundled
+    guard versionOf(paths.bundled, run) != nil else { return true }
+    return versionOf(paths.installed, run) == nil
 }

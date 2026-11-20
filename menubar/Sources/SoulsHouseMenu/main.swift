@@ -108,6 +108,15 @@ final class Menu: NSObject, NSMenuDelegate {
                 // Only right after a fresh install; afterwards the owner's choice stands.
                 if let failed = LoginItem.set(true) { notes.append(failed) }
             }
+            if case .updated = outcome {
+                // The running service still has the old binary open: restart it
+                // if launchd has it loaded. Not loaded (never paired) is fine.
+                let job = "gui/\(getuid())/house.souls.companion"
+                if runCLI("/bin/launchctl", ["print", job], timeout: 10).succeeded,
+                   !runCLI("/bin/launchctl", ["kickstart", "-k", job], timeout: 20).succeeded {
+                    notes.append("Updated, but couldn't restart the companion; log out and in to finish")
+                }
+            }
             DispatchQueue.main.async { self.installNote = notes.isEmpty ? nil : notes.joined(separator: " · ") }
             if case .failed = outcome { return false }
             return true
