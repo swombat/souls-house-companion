@@ -73,9 +73,18 @@ type Client struct {
 	Save func(State) error
 	// BeforeDelivery checks local pause/mount/policy again after I/O.
 	BeforeDelivery func() error
-	workerOnce     sync.Once
-	workerSlots    chan struct{}
+	// IdleLimit is how long a connection may go without any frame before it
+	// is treated as dead. Action Cable pings every 3 seconds, so silence
+	// means a half-open socket (typically after the Mac slept), and without
+	// this the companion waited minutes for TCP to notice while the house
+	// sent operations into the dead socket. Zero means DefaultIdleLimit.
+	IdleLimit   time.Duration
+	workerOnce  sync.Once
+	workerSlots chan struct{}
 }
+
+// DefaultIdleLimit is five missed Action Cable pings.
+const DefaultIdleLimit = 15 * time.Second
 
 func New(handler Handler) *Client {
 	return &Client{Handler: handler, HTTP: &http.Client{
@@ -264,8 +273,14 @@ func (c *Client) runOnce(ctx context.Context, state *State, shutdownGrace time.D
 	}
 	seen := make(map[string]bool)
 	var epoch string
+	idleLimit := c.IdleLimit
+	if idleLimit <= 0 {
+		idleLimit = DefaultIdleLimit
+	}
 	for {
-		_, raw, err := conn.Read(ctx)
+		readCtx, stopRead := context.WithTimeout(ctx, idleLimit)
+		_, raw, err := conn.Read(readCtx)
+		stopRead()
 		if err != nil {
 			cancel() // suppress HTTP result before waiting for workers
 			return ErrTransport

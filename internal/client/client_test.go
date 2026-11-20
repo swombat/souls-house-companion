@@ -328,3 +328,74 @@ func TestSocketFixtureDeliveryAndSuppression(t *testing.T) {
 		})
 	}
 }
+
+// A socket that stays open but goes silent is dead: after a Mac sleeps, the
+// TCP connection can sit half-open for minutes while the house sends work
+// into it. Action Cable pings every 3 seconds; missing them must end the
+// connection so the run loop reconnects (YEDPGJ, 20 Nov 2026).
+func TestSilentSocketIsTreatedAsDeadButPingsKeepItAlive(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		pings bool
+	}{{"silent", false}, {"pinging", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/companion/session" {
+					json.NewEncoder(w).Encode(map[string]any{"device_id": "device", "device_credential": "shcd_next",
+						"cable_ticket": "synthetic-ticket", "revision": 1, "policy": policy.Policy{}})
+					return
+				}
+				ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"actioncable-v1-json"}})
+				if err != nil {
+					return
+				}
+				defer ws.CloseNow()
+				_ = ws.Write(r.Context(), websocket.MessageText, []byte(`{"type":"welcome"}`))
+				go func() {
+					for {
+						if _, _, err := ws.Read(r.Context()); err != nil {
+							return
+						}
+					}
+				}()
+				for {
+					select {
+					case <-r.Context().Done():
+						return
+					case <-time.After(100 * time.Millisecond):
+						if tc.pings {
+							if ws.Write(r.Context(), websocket.MessageText, []byte(`{"type":"ping","message":1}`)) != nil {
+								return
+							}
+						}
+					}
+				}
+			}))
+			defer server.Close()
+			c := New(handlerFunc(func(context.Context, Request, policy.Policy) ([]byte, string, error) {
+				return nil, "json", nil
+			}))
+			tlsClient(c, server)
+			c.Save = func(State) error { return nil }
+			c.IdleLimit = 400 * time.Millisecond
+			state := State{URL: server.URL, DeviceID: "device", Credential: "shcd_old"}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- c.RunOnce(ctx, &state) }()
+			select {
+			case err := <-done:
+				if tc.pings {
+					t.Fatalf("a pinging connection was dropped: %v", err)
+				}
+				if !errors.Is(err, ErrTransport) {
+					t.Fatalf("silent socket ended with %v, want ErrTransport", err)
+				}
+			case <-time.After(1500 * time.Millisecond):
+				if !tc.pings {
+					t.Fatal("a silent socket was still held after nearly four idle limits")
+				}
+			}
+		})
+	}
+}
