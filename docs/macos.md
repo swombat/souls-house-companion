@@ -80,8 +80,10 @@ is always saved **paused** (also across login) and nothing is shared until
 `resume`; the Mac window runs it unless you stopped the pairing.
 
 - The local ceiling is exactly what this device offered, for each approved
-  resident, without execute; the house can only grant within it. A resident the
-  owner adds later needs `policy apply`.
+  resident, with `execute` false; the house can only grant within it. A resident
+  the owner adds later needs `policy apply`. On macOS that `execute` flag is not
+  what decides commands: the **Let residents run commands on this Mac** switch
+  is (see below).
 - `{"event":"expired"}` or `{"event":"cancelled"}` exits 3. Any other failure is one
   line on stderr, exit 1. SIGINT/SIGTERM while waiting exits 130 and writes
   nothing; after the house has approved, a signal lets the short enrollment
@@ -138,6 +140,16 @@ process names into audit logs.
 
 Without this exact per-install local opt-in, execute is refused before input
 download; read/write remain available.
+
+On macOS this switch is the whole local half of execute authority, for every
+resident in the local ceiling. The ceiling's per-resident `execute` flag is not
+read here: pairing writes it false and the app has no per-resident control, so
+reading it refused every command even with the switch on. Like disks, the Mac
+sets the most it allows and the house's per-resident grant narrows it: a
+resident runs commands only when the switch is on, they are in this Mac's
+local ceiling, and the house grants them execute. A resident not in the local
+ceiling never gains execute from the switch. On Linux the per-resident flag
+(set with `policy apply`) remains the local control.
 
 The menu bar app's **Let residents run commands on this Mac** item does this
 without Terminal. Turning it on asks once, at the Mac, what the contract

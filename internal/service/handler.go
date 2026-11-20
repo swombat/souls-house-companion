@@ -33,7 +33,8 @@ func (h *Handler) AuthorizeInput(request client.Request, ceiling policy.Policy) 
 			return nil
 		}
 	case "execute":
-		if executeLifecycleAllowed(h.ExecuteLifecycle) && policy.AllowsExecute(ceiling, request.Policy, request.ResidentID) {
+		if executeLifecycleAllowed(h.ExecuteLifecycle) &&
+			policy.AllowsExecute(localExecuteCeiling(ceiling, executeSwitchGovernsResidents), request.Policy, request.ResidentID) {
 			return nil
 		}
 	case "desktop":
