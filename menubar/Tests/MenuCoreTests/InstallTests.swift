@@ -149,6 +149,67 @@ final class InstallTests: XCTestCase {
         XCTAssertFalse(isUpgrade(from: "v0.5.0", to: "v0.4.1"))
         XCTAssertFalse(isUpgrade(from: "development", to: "v0.4.1"))
         XCTAssertFalse(isUpgrade(from: "v0.4.0", to: "dev-abc1234"))
+        // What the signed v0.3.0, v0.4.0 and v0.4.1 companions actually print.
+        XCTAssertTrue(isUpgrade(from: "da40108395bb", to: "v0.4.2"))
+        XCTAssertTrue(isUpgrade(from: "ad70d2ecb977", to: "v0.4.2"))
+        XCTAssertTrue(isUpgrade(from: "92d1e67d0545", to: "v0.4.2"))
+        XCTAssertFalse(isUpgrade(from: "92d1e67d0545", to: "v0.4.1"), "same release")
+        XCTAssertFalse(isUpgrade(from: "0123456789ab", to: "v0.4.2"), "unknown revision")
+        XCTAssertFalse(isUpgrade(from: "ad70d2ecb977-dirty", to: "v0.4.2"))
+    }
+
+    /// The signed v0.4.0 as shipped: it prints its revision, not its tag.
+    func testTheShippedV040IsUpdated() throws {
+        try fake(at: paths.bundled, version: "v0.4.2")
+        try fake(at: paths.installed, version: "ad70d2ecb977", status: #"{"enrolled":true,"paused":false}"#)
+        try put(validPlist(), at: paths.launchAgent)
+        XCTAssertEqual(ensure(), .updated(from: "ad70d2ecb977", to: "v0.4.2"))
+        XCTAssertEqual(installedVersion(), "v0.4.2")
+    }
+
+    func testAnUnknownRevisionIsLeftAlone() throws {
+        try fake(at: paths.bundled, version: "v0.4.2")
+        try fake(at: paths.installed, version: "0123456789ab")
+        XCTAssertEqual(ensure(), .existingInstall(version: "0123456789ab"))
+        XCTAssertEqual(installedVersion(), "0123456789ab")
+    }
+
+    // restartAfterUpdate against a scripted launchctl.
+    func launchctl(_ replies: [CLIResult]) -> ((String, [String]) -> CLIResult, () -> [[String]]) {
+        var queue = replies, seen: [[String]] = []
+        return ({ _, args in
+            seen.append(args)
+            return queue.isEmpty ? CLIResult(outcome: .exited(1), output: Data(), truncated: false) : queue.removeFirst()
+        }, { seen })
+    }
+    func printed(_ pid: String?) -> CLIResult {
+        let body = pid.map { "state = running\n\tpid = \($0)\n" } ?? "state = not running\n"
+        return CLIResult(outcome: .exited(0), output: Data(body.utf8), truncated: false)
+    }
+    let ok = CLIResult(outcome: .exited(0), output: Data(), truncated: false)
+
+    func testRestartNotNeededWhenTheJobIsAbsent() {
+        let (run, seen) = launchctl([CLIResult(outcome: .exited(113), output: Data(), truncated: false)])
+        XCTAssertNil(restartAfterUpdate(job: "gui/501/x", run: run))
+        XCTAssertEqual(seen().map { $0[0] }, ["print"], "no kickstart")
+    }
+
+    func testRestartIsVerifiedByANewPid() {
+        let (run, seen) = launchctl([printed("100"), ok, printed("100"), printed("200")])
+        XCTAssertNil(restartAfterUpdate(job: "gui/501/x", run: run))
+        XCTAssertEqual(seen().map { $0[0] }, ["print", "kickstart", "print", "print"])
+    }
+
+    func testALookupFailureIsNotTakenForAbsence() {
+        let (run, _) = launchctl([CLIResult(outcome: .exited(5), output: Data(), truncated: false)])
+        XCTAssertEqual(restartAfterUpdate(job: "gui/501/x", run: run),
+                       "Updated, but couldn't check whether the companion is running")
+    }
+
+    func testAKickstartThatSucceedsButNeverRunsIsReported() {
+        let (run, _) = launchctl([printed("100"), ok] + Array(repeating: printed(nil), count: 10))
+        XCTAssertEqual(restartAfterUpdate(job: "gui/501/x", run: run),
+                       "Updated, but the companion didn't come back running; log out and in to finish")
     }
 
     func testAnInstalledCompanionThatDoesntAnswerIsLeftAlone() throws {

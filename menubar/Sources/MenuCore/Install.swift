@@ -84,9 +84,19 @@ func isSymlink(_ path: String) -> Bool {
     ((try? FileManager.default.attributesOfItem(atPath: path))?[.type] as? FileAttributeType) == .typeSymbolicLink
 }
 
-/// Release versions ("v0.4.1") as numbers; nil for anything else
-/// ("development", "dev-abc1234"), which is never compared.
-func releaseNumbers(_ v: String) -> [Int]? {
+/// Companions shipped inside the Mac app before releases were stamped with
+/// their tag: they print the 12-character revision of the tagged commit.
+let shippedRevisions = [
+    "da40108395bb": "v0.3.0",
+    "ad70d2ecb977": "v0.4.0",
+    "92d1e67d0545": "v0.4.1",
+]
+
+/// Release versions ("v0.4.1", or a known shipped revision) as numbers; nil
+/// for anything else ("development", "dev-abc1234", another revision), which
+/// is never compared and so never replaced.
+func releaseNumbers(_ raw: String) -> [Int]? {
+    let v = shippedRevisions[raw] ?? raw
     guard v.hasPrefix("v") else { return nil }
     let parts = v.dropFirst().split(separator: ".", omittingEmptySubsequences: false).map { Int($0) }
     guard parts.count == 3, parts.allSatisfy({ $0 != nil }) else { return nil }
@@ -170,8 +180,13 @@ func update(_ paths: CompanionInstall, from old: String, to new: String,
         return .failed("Couldn't update the companion")
     }
     guard versionOf(target, run) == new else {
-        _ = rename(previous, target)
-        return .failed("The updated companion didn't answer; the earlier one was put back")
+        // Put the old binary back by linking, so `.previous` stays as a
+        // recovery copy whatever happens here.
+        let restored = unlink(target) == 0 && link(previous, target) == 0
+            && versionOf(target, run) == old
+        return .failed(restored
+            ? "The updated companion didn't answer; the earlier one was put back"
+            : "The updated companion didn't answer and the earlier one couldn't be put back; it is kept at \(previous)")
     }
     return configure(paths, run) ?? .updated(from: old, to: new)
 }
@@ -213,4 +228,37 @@ public func earlierSetup(_ paths: CompanionInstall, legacyMenuAgent: String,
     if paths.needsFirstInstall { return paths.leftovers }
     guard versionOf(paths.bundled, run) != nil else { return true }
     return versionOf(paths.installed, run) == nil
+}
+
+/// The pid in `launchctl print` output when the job is running, else nil.
+func runningPID(_ printed: Data) -> String? {
+    guard let text = String(data: printed, encoding: .utf8),
+          text.contains("state = running") else { return nil }
+    for line in text.split(separator: "\n") {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix("pid = ") { return String(t.dropFirst(6)) }
+    }
+    return nil
+}
+
+/// After an update, restarts the companion's launchd job so the new binary
+/// runs. Returns nil when there was nothing to restart (launchd reports the
+/// job absent: never loaded) or when a new process is seen running; otherwise
+/// a line for the menu. Exit 113 is launchctl's "could not find service";
+/// any other failure to look is reported, not taken for absence.
+public func restartAfterUpdate(job: String, run: (String, [String]) -> CLIResult) -> String? {
+    let launchctl = "/bin/launchctl"
+    let before = run(launchctl, ["print", job])
+    if before.outcome == .exited(113) { return nil }
+    guard before.succeeded else { return "Updated, but couldn't check whether the companion is running" }
+    let oldPID = runningPID(before.output)
+    guard run(launchctl, ["kickstart", "-k", job]).succeeded else {
+        return "Updated, but couldn't restart the companion; log out and in to finish"
+    }
+    for _ in 0..<10 {
+        let after = run(launchctl, ["print", job])
+        if after.succeeded, let pid = runningPID(after.output), pid != oldPID { return nil }
+        Thread.sleep(forTimeInterval: 0.5)
+    }
+    return "Updated, but the companion didn't come back running; log out and in to finish"
 }

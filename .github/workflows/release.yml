@@ -105,7 +105,7 @@ jobs:
           fi
 
       - name: Build command-line companion (scripts/build-macos.sh)
-        run: sh scripts/build-macos.sh dist
+        run: sh scripts/build-macos.sh dist "$VERSION"
 
       - name: Build menu bar app (scripts/build-menubar.sh)
         # The app carries the companion just built and installs it on first open.
