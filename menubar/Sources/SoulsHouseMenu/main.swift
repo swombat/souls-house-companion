@@ -359,8 +359,8 @@ final class Menu: NSObject, NSMenuDelegate {
         let alert = NSAlert()
         alert.messageText = "Let residents run commands on this Mac?"
         alert.informativeText = """
-            Residents you have given Run commands on your Computers page will be able to run \
-            commands on this Mac as you, with your user's access.
+            Residents paired to this Mac whom you have given Run commands on your Computers \
+            page will be able to run commands on this Mac as you, with your user's access.
 
             macOS can't guarantee that every process a command starts is stopped afterwards. \
             You can turn this off here at any time.

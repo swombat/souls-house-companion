@@ -11,10 +11,6 @@ import (
 
 func executeLifecycleAllowed(contract string) bool { return contract == runner.Lifecycle }
 
-// The "Let residents run commands on this Mac" switch is the local execute
-// ceiling for every paired resident; see localExecuteCeiling.
-const executeSwitchGovernsResidents = true
-
 func platformResult(data []byte, format string, err error) ([]byte, string, error) {
 	if errors.Is(err, linuxfs.ErrQuarantine) {
 		return []byte(`{"status":"operation_denied","operation_error":"invalid_quarantine"}`), "json", nil

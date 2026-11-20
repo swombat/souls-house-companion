@@ -145,6 +145,15 @@ func run(args []string) error {
 			return err
 		}
 		state.ExecuteLifecycle = *contract // --revoke leaves this empty
+		// The switch is the owner's local choice for the residents paired to
+		// this device: accepting writes execute for each of them into the
+		// local ceiling (where `policy show` displays it), revoking writes it
+		// back. Nothing changes on upgrade; only this explicit act does.
+		// Pairing writes execute false and the Mac app has no per-resident
+		// control, so without this the switch could never allow a command.
+		if switchWritesLocalExecute {
+			state.Ceiling = withLocalExecute(state.Ceiling, *contract != "")
+		}
 		return client.Save(*dir, state)
 	case "uninstall":
 		if !*user {

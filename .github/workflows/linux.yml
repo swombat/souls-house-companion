@@ -67,5 +67,5 @@ jobs:
           codesign --verify --strict --deep "$app"
           [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")" = ci-check ]
           [ "$("$app/Contents/MacOS/souls-house-companion" version)" = "$(dist/companion-darwin-arm64 version)" ]
-      - name: Darwin client tests (run, not just compiled)
-        run: go test ./internal/client/
+      - name: Darwin client, service and command tests (run, not just compiled)
+        run: go test ./internal/client/ ./internal/service/ ./cmd/companion/
