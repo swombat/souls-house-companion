@@ -115,6 +115,34 @@ func parseStatus(out []byte, err error, active bool) snapshot {
 	}
 }
 
+type updateInfo struct {
+	available bool
+	latest    string
+}
+
+func (u updateInfo) menuTitle() string {
+	if u.latest != "" {
+		return "Update available (" + u.latest + ")"
+	}
+	return "Update available"
+}
+
+// parseUpdateCheck parses `souls-house-companion update --check --json`.
+// Any error or malformed JSON yields no update available (fail quiet).
+func parseUpdateCheck(out []byte, err error) updateInfo {
+	if err != nil {
+		return updateInfo{}
+	}
+	var res struct {
+		Latest          string `json:"latest"`
+		UpdateAvailable bool   `json:"update_available"`
+	}
+	if json.Unmarshal(out, &res) != nil || !res.UpdateAvailable || res.Latest == "" {
+		return updateInfo{}
+	}
+	return updateInfo{available: true, latest: res.Latest}
+}
+
 const companionUnit = "souls-house-companion.service"
 
 // serviceActive asks the user manager; anything but "active" is not running.

@@ -18,6 +18,9 @@ import (
 )
 
 const aboutURL = "https://souls.house/companion"
+const updateCheckInterval = 12 * time.Hour
+
+var version = "development"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -36,8 +39,11 @@ func command(args []string) error {
 		return installUnit()
 	case "uninstall":
 		return uninstallUnit()
+	case "version":
+		fmt.Println(version)
+		return nil
 	default:
-		return errors.New("usage: souls-house-tray [install|uninstall]")
+		return errors.New("usage: souls-house-tray [install|uninstall|version]")
 	}
 }
 
@@ -49,10 +55,12 @@ type tray struct {
 	failed             string
 	confirmingCommands bool
 	refreshing         bool
+	checkingUpdate     bool
+	update             updateInfo
 	coord              *coordinator
 	icons              map[mark][]byte
 
-	status, toggle, commandsToggle, commandsConfirm, commandsCancel, note, about, quit *systray.MenuItem
+	status, toggle, commandsToggle, commandsConfirm, commandsCancel, updateItem, note, about, quit *systray.MenuItem
 }
 
 func onReady() {
@@ -69,6 +77,8 @@ func onReady() {
 	t.commandsConfirm.Hide()
 	t.commandsCancel = systray.AddMenuItem("Cancel", "Keep commands off")
 	t.commandsCancel.Hide()
+	t.updateItem = systray.AddMenuItem("Update available", "Install the latest souls.house companion release")
+	t.updateItem.Hide()
 	t.note = systray.AddMenuItem("", "")
 	t.note.Disable()
 	t.note.Hide()
@@ -78,15 +88,20 @@ func onReady() {
 	t.render()
 	go t.loop()
 	t.refresh()
+	t.checkUpdate()
 }
 
 func (t *tray) loop() {
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
+	updateTick := time.NewTicker(updateCheckInterval)
+	defer updateTick.Stop()
 	for {
 		select {
 		case <-tick.C:
 			t.refresh()
+		case <-updateTick.C:
+			t.checkUpdate()
 		case <-t.toggle.ClickedCh:
 			t.togglePause()
 		case <-t.commandsToggle.ClickedCh:
@@ -95,6 +110,8 @@ func (t *tray) loop() {
 			t.setCommands(true)
 		case <-t.commandsCancel.ClickedCh:
 			t.cancelCommandsConfirm()
+		case <-t.updateItem.ClickedCh:
+			t.applyUpdate()
 		case <-t.about.ClickedCh:
 			_ = exec.Command("xdg-open", aboutURL).Start()
 		case <-t.quit.ClickedCh:
@@ -218,13 +235,62 @@ func (t *tray) togglePause() {
 	})
 }
 
+func (t *tray) checkUpdate() {
+	t.mu.Lock()
+	if t.checkingUpdate {
+		t.mu.Unlock()
+		return
+	}
+	t.checkingUpdate = true
+	t.mu.Unlock()
+	go func() {
+		out, err := runCompanion(15*time.Second, "update", "--check", "--json")
+		info := parseUpdateCheck(out, err)
+		t.mu.Lock()
+		t.checkingUpdate = false
+		t.update = info
+		t.mu.Unlock()
+		t.render()
+	}()
+}
+
+func (t *tray) applyUpdate() {
+	t.mu.Lock()
+	if !t.update.available || t.inProgress != "" {
+		t.mu.Unlock()
+		return
+	}
+	t.confirmingCommands = false
+	t.inProgress, t.failed = "Update companion", ""
+	t.mu.Unlock()
+	t.render()
+	t.coord.change(func() bool {
+		_, err := runCompanion(2*time.Minute, "update")
+		return err == nil
+	}, func(ok bool) {
+		t.mu.Lock()
+		if !t.coord.busy() {
+			t.inProgress = ""
+		}
+		if ok {
+			t.update = updateInfo{}
+		} else {
+			t.failed = "Could not update companion"
+		}
+		t.mu.Unlock()
+		t.render()
+		t.refresh()
+		t.checkUpdate()
+	})
+}
+
 // render publishes the newest state as one unit: the state is read inside the
 // render lock, so whichever render finishes last shows the latest state.
 func (t *tray) render() {
 	t.renderMu.Lock()
 	defer t.renderMu.Unlock()
 	t.mu.Lock()
-	snap, inProgress, failed, confirming := t.snap, t.inProgress, t.failed, t.confirmingCommands
+	snap, inProgress, failed, confirming, upd := t.snap, t.inProgress, t.failed, t.confirmingCommands, t.update
 	t.mu.Unlock()
 	systray.SetIcon(t.icons[snap.mark()])
 	systray.SetTooltip(snap.tooltip())
@@ -262,6 +328,17 @@ func (t *tray) render() {
 	} else {
 		t.commandsConfirm.Hide()
 		t.commandsCancel.Hide()
+	}
+	if upd.available {
+		t.updateItem.SetTitle(upd.menuTitle())
+		if inProgress != "" {
+			t.updateItem.Disable()
+		} else {
+			t.updateItem.Enable()
+		}
+		t.updateItem.Show()
+	} else {
+		t.updateItem.Hide()
 	}
 	if failed != "" {
 		t.note.SetTitle(failed)

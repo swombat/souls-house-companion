@@ -86,6 +86,12 @@ func writeHelp(w io.Writer, topic string) error {
 	case "commands":
 		_, err := fmt.Fprint(w, commandsHelpText)
 		return err
+	case "update":
+		_, err := fmt.Fprint(w, updateHelpText)
+		return err
+	case "upgrade-from":
+		_, err := fmt.Fprint(w, upgradeFromHelpText)
+		return err
 	case "pair":
 		_, err := fmt.Fprint(w, pairHelpText)
 		return err
@@ -145,6 +151,7 @@ Usage:
 Getting started:
   setup              Guided pairing, service installation, and optional tray setup
   commands on|off    Allow or disallow paired residents running local commands
+  update             Check for or install a newer companion release
   status             Show local pairing, pause state, and ceiling JSON
   pause              Stop the companion and refuse all remote requests
   resume             Clear local pause and start the companion service
@@ -158,6 +165,7 @@ Advanced & plumbing commands:
   serve              Run the companion daemon in the foreground
   enroll             Enroll using an explicit device request ID and stdin token
   execute-lifecycle  Manage local execute-lifecycle contract acceptance
+  upgrade-from       Install or upgrade binaries from a verified local staging directory
   accessibility      Check or request macOS Accessibility permission
   desktop            Manage timed desktop control switch
   version            Print the companion version
@@ -292,4 +300,31 @@ Manage the timed local desktop control switch.
 const versionHelpText = `Usage: souls-house-companion version
 
 Print the companion version string.
+`
+
+const updateHelpText = `Usage: souls-house-companion update [flags]
+
+Check for or install a newer release from the companion's GitHub releases.
+Downloads SHA256SUMS and verifies the archive checksum before extracting.
+Refuses downgrades without --force, keeps a .previous backup, never starts a
+paused or stopped service, verifies the restarted service is executing the new
+binary, and rolls back automatically if the local service fails to start.
+
+Flags:
+  --check              Check whether a newer release is available without changing anything
+  --json               Print --check output as JSON
+  --force              Allow reinstalling the same version or downgrading
+  --install-dir PATH   Directory containing installed binaries (default directory of current binary)
+  --state-dir PATH     Private state directory
+`
+
+const upgradeFromHelpText = `Usage: souls-house-companion upgrade-from [flags] <staged-dir>
+
+Install or upgrade souls-house-companion (and souls-house-tray if present) from
+a verified local staging directory. Used by install-linux.sh and 'update'.
+
+Flags:
+  --install-dir PATH   Directory to install binaries into (default ~/.local/bin)
+  --state-dir PATH     Private state directory
+  --force              Allow reinstalling the same version or downgrading
 `

@@ -394,11 +394,15 @@ jobs:
           tar -xzf release-linux/*-linux-amd64.tar.gz -C smoke
           got=$(smoke/*/souls-house-companion version)
           [ "$got" = "${{ steps.version.outputs.version }}" ] || { echo "version printed $got" >&2; exit 1; }
+          tray_got=$(smoke/*/souls-house-tray version)
+          [ "$tray_got" = "${{ steps.version.outputs.version }}" ] || { echo "tray version printed $tray_got" >&2; exit 1; }
+          grep -Fq "RELEASE_VERSION=\"${{ steps.version.outputs.version }}\"" release-linux/install-linux.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: companion-linux-${{ steps.version.outputs.version }}
           path: |
             release-linux/*-linux-*.tar.gz
+            release-linux/install-linux.sh
             release-linux/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
@@ -429,7 +433,7 @@ jobs:
           set -euo pipefail
           (cd release && sha256sum -c SHA256SUMS)
           (cd release-linux && sha256sum -c SHA256SUMS)
-          mv release-linux/*-linux-*.tar.gz release/
+          mv release-linux/*-linux-*.tar.gz release-linux/install-linux.sh release/
           cat release-linux/SHA256SUMS >> release/SHA256SUMS
           (cd release && sha256sum -c SHA256SUMS)
       - name: Create DRAFT release
@@ -443,7 +447,7 @@ jobs:
             --title "$TAG" \
             --notes "Signed and notarised darwin/arm64 build (the .dmg is the download: open it, drag souls.house to Applications, open it), plus linux/amd64 and linux/arm64 tarballs. Draft: open it on a clean Mac before publishing or linking." \
             release/souls.house-*-darwin-arm64.dmg release/souls-house-companion-*-darwin-arm64.zip \
-            release/*-linux-*.tar.gz release/SHA256SUMS
+            release/*-linux-*.tar.gz release/install-linux.sh release/SHA256SUMS
 
   # The early, unsigned build: only by hand, only when the signing secrets are
   # absent (a build with them is never published unsigned), and only as a
@@ -471,7 +475,7 @@ jobs:
           set -euo pipefail
           (cd release && sha256sum -c SHA256SUMS)
           (cd release-linux && sha256sum -c SHA256SUMS)
-          mv release-linux/*-linux-*.tar.gz release/
+          mv release-linux/*-linux-*.tar.gz release-linux/install-linux.sh release/
           cat release-linux/SHA256SUMS >> release/SHA256SUMS
           (cd release && sha256sum -c SHA256SUMS)
       - name: Create the early-unsigned prerelease
@@ -495,7 +499,7 @@ jobs:
           gh release create "$tag" --repo "$REPO" --prerelease --target "$SHA" \
             --title "Early build, UNSIGNED ($tag)" \
             --notes "Mac: not signed or notarised by Apple. macOS blocks it the first time: System Settings → Privacy & Security → Open Anyway. Each update asks for Accessibility again. Replaced by the signed build once Apple approves. Linux: static amd64 and arm64 tarballs (Linux has no signing step); early build, see README.md inside. sha256 for every file is in SHA256SUMS." \
-            release/*-UNSIGNED.zip release/*-linux-*.tar.gz release/SHA256SUMS
+            release/*-UNSIGNED.zip release/*-linux-*.tar.gz release/install-linux.sh release/SHA256SUMS
           {
             echo "### Early unsigned prerelease: $tag"
             echo

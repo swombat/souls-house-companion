@@ -80,6 +80,11 @@ only **Stop allowing commands**.
 
 - `souls-house-companion --help` — list commands and flags (`help <command>`
   for details).
+- `souls-house-companion update --check` — check whether a newer release is
+  available (against the companion's own GitHub releases).
+- `souls-house-companion update` — verify checksums and upgrade in place,
+  keeping `.previous`, preserving pause state, verifying the restarted service
+  runs the new binary, and rolling back automatically if local start fails.
 - `souls-house-companion status` — print local pairing, pause state, and
   ceiling JSON.
 - `souls-house-companion pause` — write the local deny marker and stop the

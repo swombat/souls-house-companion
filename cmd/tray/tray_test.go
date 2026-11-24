@@ -59,6 +59,25 @@ func TestParseStatus(t *testing.T) {
 	}
 }
 
+func TestParseUpdateCheck(t *testing.T) {
+	avail := parseUpdateCheck([]byte(`{"current":"v0.1.0","latest":"v0.2.0","update_available":true}`), nil)
+	if !avail.available || avail.latest != "v0.2.0" || avail.menuTitle() != "Update available (v0.2.0)" {
+		t.Fatalf("unexpected available update: %+v title=%q", avail, avail.menuTitle())
+	}
+	current := parseUpdateCheck([]byte(`{"current":"v0.2.0","latest":"v0.2.0","update_available":false}`), nil)
+	if current.available {
+		t.Fatalf("expected no update available, got %+v", current)
+	}
+	failed := parseUpdateCheck([]byte(`{"latest":"v0.2.0","update_available":true}`), errors.New("offline"))
+	if failed.available {
+		t.Fatalf("expected error to fail quiet, got %+v", failed)
+	}
+	garbage := parseUpdateCheck([]byte(`not json`), nil)
+	if garbage.available {
+		t.Fatalf("expected garbage to fail quiet, got %+v", garbage)
+	}
+}
+
 // A fake systemctl on PATH that records its arguments and fails when told to.
 func fakeSystemctl(t *testing.T, failOn string) (log string) {
 	t.Helper()
