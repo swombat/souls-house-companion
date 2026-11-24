@@ -65,6 +65,51 @@ func TestLinuxVerifyRunningBinaryWithProc(t *testing.T) {
 	}
 }
 
+func TestParseSystemdExecStartBinary(t *testing.T) {
+	cases := []struct {
+		name    string
+		unit    string
+		want    string
+		wantOK  bool
+		wantErr bool
+	}{
+		{
+			name:   "quoted",
+			unit:   "[Service]\nExecStart=\"/home/u/custom/souls-house-companion\" serve --state-dir \"/home/u/state\"\n",
+			want:   "/home/u/custom/souls-house-companion",
+			wantOK: true,
+		},
+		{
+			name:   "unquoted",
+			unit:   "[Service]\nExecStart=/home/u/.local/bin/souls-house-companion serve\n",
+			want:   "/home/u/.local/bin/souls-house-companion",
+			wantOK: true,
+		},
+		{
+			name:   "prefixed",
+			unit:   "[Service]\nExecStart=-/home/u/.local/bin/souls-house-companion serve\n",
+			want:   "/home/u/.local/bin/souls-house-companion",
+			wantOK: true,
+		},
+		{
+			name:   "absent",
+			unit:   "[Unit]\nDescription=test\n",
+			wantOK: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok, err := parseSystemdExecStartBinary(tc.unit)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
+			}
+			if ok != tc.wantOK || got != tc.want {
+				t.Fatalf("got (%q, %v), want (%q, %v)", got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
 func buildTestReleaseServer(t *testing.T, ver string, badChecksum bool) (*httptest.Server, string) {
 	t.Helper()
 	repoRoot, err := filepath.Abs("../..")
@@ -119,7 +164,20 @@ func buildTestReleaseServer(t *testing.T, ver string, badChecksum bool) (*httpte
 		}
 	}))
 	t.Cleanup(srv.Close)
-	return srv, filepath.Join(repoRoot, "scripts", "install-linux.sh")
+
+	// Stamp the release-generated installer script using the exact sed rule from
+	// scripts/build-linux.sh so the tests exercise the real published script
+	// without passing --version.
+	stampedScript := filepath.Join(t.TempDir(), "install-linux.sh")
+	sedCmd := exec.Command("sed", fmt.Sprintf(`s|^RELEASE_VERSION=""$|RELEASE_VERSION="%s"|`, ver), filepath.Join(repoRoot, "scripts", "install-linux.sh"))
+	stampedBytes, err := sedCmd.Output()
+	if err != nil {
+		t.Fatalf("stamping install-linux.sh failed: %v", err)
+	}
+	if err := os.WriteFile(stampedScript, stampedBytes, 0755); err != nil {
+		t.Fatal(err)
+	}
+	return srv, stampedScript
 }
 
 // TestLinuxInstallScriptLegacyAae878cUpgrade tests the install-linux.sh entry
@@ -221,8 +279,9 @@ exit 0
 		t.Fatal(err)
 	}
 
+	// Run the release-stamped installer WITHOUT --version to verify the
+	// published script uses its own stamped RELEASE_VERSION.
 	cmd := exec.Command("sh", scriptPath,
-		"--version", ver,
 		"--install-dir", installDir,
 		"--state-dir", stateDir,
 		"--release-base-url", srv.URL,
@@ -264,6 +323,18 @@ exit 0
 	if len(st.Ceiling.Residents) != 2 || !st.Ceiling.Residents[0].Execute || st.Ceiling.Residents[1].Execute {
 		t.Fatalf("per-resident execute policy altered during upgrade: %+v", st.Ceiling)
 	}
+
+	// Tray must never be stopped mid-upgrade; only try-restart --no-block after companion start.
+	logs, _ := os.ReadFile(logFile)
+	logStr := string(logs)
+	if strings.Contains(logStr, "stop souls-house-tray.service") {
+		t.Fatalf("upgrade must never stop tray unit mid-upgrade; systemctl log:\n%s", logStr)
+	}
+	startIdx := strings.Index(logStr, "start souls-house-companion.service")
+	trayIdx := strings.Index(logStr, "try-restart --no-block souls-house-tray.service")
+	if startIdx < 0 || trayIdx < 0 || trayIdx < startIdx {
+		t.Fatalf("expected tray try-restart --no-block after companion start; systemctl log:\n%s", logStr)
+	}
 }
 
 func TestLinuxInstallScriptBadChecksumAndPausedDevice(t *testing.T) {
@@ -286,7 +357,6 @@ func TestLinuxInstallScriptBadChecksumAndPausedDevice(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(fakeBin, "systemctl"), []byte(fmt.Sprintf("#!/bin/sh\necho \"$*\" >> %q\nexit 0\n", logFile)), 0755)
 
 		cmd := exec.Command("sh", scriptPath,
-			"--version", ver,
 			"--install-dir", installDir,
 			"--state-dir", stateDir,
 			"--release-base-url", srv.URL,
@@ -330,7 +400,6 @@ exit 0
 `, logFile)), 0755)
 
 		cmd := exec.Command("sh", scriptPath,
-			"--version", ver,
 			"--install-dir", installDir,
 			"--state-dir", stateDir,
 			"--release-base-url", srv.URL,

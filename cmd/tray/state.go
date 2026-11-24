@@ -143,6 +143,31 @@ func parseUpdateCheck(out []byte, err error) updateInfo {
 	return updateInfo{available: true, latest: res.Latest}
 }
 
+// buildUpdateCommand constructs the command to run `souls-house-companion update`.
+// When systemd-run is available, the update runs in its own transient user
+// service unit outside souls-house-tray.service's cgroup so restarting the tray
+// cannot kill the updater.
+func buildUpdateCommand(ctx context.Context, companion string, systemdRunPath string) *exec.Cmd {
+	if systemdRunPath != "" {
+		return exec.CommandContext(ctx, systemdRunPath,
+			"--user", "--collect", "--wait", "--quiet",
+			"--property=Type=oneshot",
+			"--description=Update souls.house Companion",
+			"--", companion, "update",
+		)
+	}
+	return exec.CommandContext(ctx, companion, "update")
+}
+
+func runCompanionUpdate(timeout time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	sr, _ := exec.LookPath("systemd-run")
+	cmd := buildUpdateCommand(ctx, companionPath(), sr)
+	cmd.WaitDelay = time.Second
+	return cmd.Output()
+}
+
 const companionUnit = "souls-house-companion.service"
 
 // serviceActive asks the user manager; anything but "active" is not running.

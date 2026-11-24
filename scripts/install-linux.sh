@@ -8,7 +8,7 @@ set -eu
 # builds (such as commit-stamped builds that lack `upgrade-from`) share one
 # upgrade engine.
 
-RELEASE_VERSION="@@RELEASE_VERSION@@"
+RELEASE_VERSION=""
 REPO="swombat/souls-house-companion"
 
 usage() {
@@ -19,7 +19,6 @@ Flags:
   --version VER             Release version to install (default: version stamped into this script)
   --install-dir PATH        Install directory for binaries (default: ~/.local/bin)
   --state-dir PATH          Private state directory (default: ~/.local/share/souls-house-companion)
-  --release-base-url URL    Base URL serving SHA256SUMS and the release tarball
   --force                   Allow reinstalling the same version or downgrading
   --no-setup                Do not launch guided setup after a fresh install
   -h, --help                Show this help
@@ -28,6 +27,7 @@ EOF
 
 version="$RELEASE_VERSION"
 install_dir="${HOME:?HOME must be set}/.local/bin"
+install_dir_explicit=0
 state_dir="${HOME}/.local/share/souls-house-companion"
 release_base_url=""
 force=0
@@ -43,6 +43,7 @@ while [ "$#" -gt 0 ]; do
     --install-dir)
       [ "$#" -ge 2 ] || { echo "install-linux.sh: --install-dir requires a value" >&2; exit 2; }
       install_dir="$2"
+      install_dir_explicit=1
       shift 2
       ;;
     --state-dir)
@@ -104,20 +105,7 @@ download_file() {
   fi
 }
 
-download_file_any_scheme() {
-  url="$1"
-  out="$2"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL -o "$out" "$url"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$out" "$url"
-  else
-    echo "install-linux.sh: curl or wget is required" >&2
-    exit 1
-  fi
-}
-
-if [ "$version" = "@@RELEASE_VERSION@@" ] || [ -z "$version" ]; then
+if [ -z "$version" ]; then
   echo "install-linux.sh: --version is required when running an unstamped script" >&2
   exit 1
 fi
@@ -127,11 +115,20 @@ if ! printf '%s' "$version" | grep -Eq '^[A-Za-z0-9._-]+$'; then
   exit 1
 fi
 
-use_custom_base=0
+allow_loopback_http=0
 if [ -z "$release_base_url" ]; then
   release_base_url="https://github.com/${REPO}/releases/download/${version}"
 else
-  use_custom_base=1
+  case "$release_base_url" in
+    https://*) ;;
+    http://127.0.0.1:*|http://127.0.0.1/*|http://localhost:*|http://localhost/*)
+      allow_loopback_http=1
+      ;;
+    *)
+      echo "install-linux.sh: --release-base-url must use https:// (or loopback http:// for local tests)" >&2
+      exit 1
+      ;;
+  esac
 fi
 release_base_url="${release_base_url%/}"
 
@@ -145,9 +142,17 @@ sums_path="${tmpdir}/SHA256SUMS"
 tar_path="${tmpdir}/${asset_file}"
 
 echo "Downloading souls.house Companion ${version} (${arch})..."
-if [ "$use_custom_base" -eq 1 ]; then
-  download_file_any_scheme "${release_base_url}/SHA256SUMS" "$sums_path"
-  download_file_any_scheme "${release_base_url}/${asset_file}" "$tar_path"
+if [ "$allow_loopback_http" -eq 1 ]; then
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o "$sums_path" "${release_base_url}/SHA256SUMS"
+    curl -fsSL -o "$tar_path" "${release_base_url}/${asset_file}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$sums_path" "${release_base_url}/SHA256SUMS"
+    wget -qO "$tar_path" "${release_base_url}/${asset_file}"
+  else
+    echo "install-linux.sh: curl or wget is required" >&2
+    exit 1
+  fi
 else
   download_file "${release_base_url}/SHA256SUMS" "$sums_path"
   download_file "${release_base_url}/${asset_file}" "$tar_path"
@@ -196,7 +201,10 @@ fi
 
 # Invoke upgrade-from on the verified staged binary (not any pre-existing binary,
 # which may be a legacy commit-stamped build that does not know upgrade-from).
-set -- upgrade-from --install-dir "$install_dir" --state-dir "$state_dir"
+set -- upgrade-from --state-dir "$state_dir"
+if [ "$install_dir_explicit" -eq 1 ]; then
+  set -- "$@" --install-dir "$install_dir"
+fi
 if [ "$force" -eq 1 ]; then
   set -- "$@" --force
 fi

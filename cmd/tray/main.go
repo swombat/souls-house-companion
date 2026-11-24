@@ -265,7 +265,7 @@ func (t *tray) applyUpdate() {
 	t.mu.Unlock()
 	t.render()
 	t.coord.change(func() bool {
-		_, err := runCompanion(2*time.Minute, "update")
+		_, err := runCompanionUpdate(2 * time.Minute)
 		return err == nil
 	}, func(ok bool) {
 		t.mu.Lock()

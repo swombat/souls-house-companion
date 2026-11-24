@@ -136,9 +136,7 @@ func TestUpdateCheckAndBadChecksum(t *testing.T) {
 		unitRunning:         func(context.Context) (bool, error) { return true, nil },
 		stopUnit:            func(context.Context) error { t.Fatal("stopUnit should not be called on bad checksum"); return nil },
 		startUnit:           func(string) error { t.Fatal("startUnit should not be called on bad checksum"); return nil },
-		trayUnitRunning:     func(context.Context) (bool, error) { return false, nil },
-		stopTrayUnit:        func(context.Context) error { return nil },
-		startTrayUnit:       func() error { return nil },
+		restartTrayUnit:     func(context.Context) error { return nil },
 		verifyRunningBinary: func(context.Context, string) error { return nil },
 		queryBinaryVersion: func(_ context.Context, p string) (string, error) {
 			if p == oldBin {
@@ -195,19 +193,20 @@ func TestUpgradeFromEngine(t *testing.T) {
 		_ = os.WriteFile(oldBin, []byte("old-aae878c"), 0755)
 		_ = client.Save(stateDir, client.State{DeviceID: "d1", Credential: "c1", Paused: false})
 		stage := setupStage(t, "new-v0.5.0")
+		_ = os.WriteFile(filepath.Join(stage, "souls-house-tray"), []byte("new-tray-v0.5.0"), 0755)
 
-		stopped, started, verified := 0, 0, 0
+		var order []string
+		stopped, started, verified, trayRestarted := 0, 0, 0, 0
 		deps := updateDeps{
 			out:               &bytes.Buffer{},
 			defaultInstallDir: func(string) string { return installDir },
 			unitRunning:       func(context.Context) (bool, error) { return true, nil },
-			stopUnit:          func(context.Context) error { stopped++; return nil },
-			startUnit:         func(string) error { started++; return nil },
-			trayUnitRunning:   func(context.Context) (bool, error) { return false, nil },
-			stopTrayUnit:      func(context.Context) error { return nil },
-			startTrayUnit:     func() error { return nil },
+			stopUnit:          func(context.Context) error { stopped++; order = append(order, "stop"); return nil },
+			startUnit:         func(string) error { started++; order = append(order, "start"); return nil },
+			restartTrayUnit:   func(context.Context) error { trayRestarted++; order = append(order, "tray-try-restart"); return nil },
 			verifyRunningBinary: func(_ context.Context, p string) error {
 				verified++
+				order = append(order, "verify")
 				if p != oldBin {
 					t.Fatalf("verify path = %q, want %q", p, oldBin)
 				}
@@ -224,8 +223,11 @@ func TestUpgradeFromEngine(t *testing.T) {
 		if err := runUpgradeFrom(context.Background(), home, upgradeOptions{stagedDir: stage, installDir: installDir, stateDir: stateDir}, deps); err != nil {
 			t.Fatalf("upgrade failed: %v", err)
 		}
-		if stopped != 1 || started != 1 || verified != 1 {
-			t.Fatalf("expected stop=1 start=1 verify=1, got %d/%d/%d", stopped, started, verified)
+		if stopped != 1 || started != 1 || verified != 1 || trayRestarted != 1 {
+			t.Fatalf("expected stop=1 start=1 verify=1 trayRestart=1, got %d/%d/%d/%d", stopped, started, verified, trayRestarted)
+		}
+		if strings.Join(order, ",") != "stop,start,verify,tray-try-restart" {
+			t.Fatalf("unexpected lifecycle order: %v", order)
 		}
 		if got, _ := os.ReadFile(oldBin); string(got) != "new-v0.5.0" {
 			t.Fatalf("installed binary = %q", got)
@@ -255,9 +257,7 @@ func TestUpgradeFromEngine(t *testing.T) {
 			},
 			stopUnit:            func(context.Context) error { t.Fatal("stopUnit must not run for paused device"); return nil },
 			startUnit:           func(string) error { t.Fatal("startUnit must not run for paused device"); return nil },
-			trayUnitRunning:     func(context.Context) (bool, error) { return false, nil },
-			stopTrayUnit:        func(context.Context) error { return nil },
-			startTrayUnit:       func() error { return nil },
+			restartTrayUnit:     func(context.Context) error { return nil },
 			verifyRunningBinary: func(context.Context, string) error { return nil },
 			queryBinaryVersion: func(_ context.Context, p string) (string, error) {
 				if p == oldBin {
@@ -292,9 +292,7 @@ func TestUpgradeFromEngine(t *testing.T) {
 			unitRunning:         func(context.Context) (bool, error) { return false, nil },
 			stopUnit:            func(context.Context) error { return nil },
 			startUnit:           func(string) error { return nil },
-			trayUnitRunning:     func(context.Context) (bool, error) { return false, nil },
-			stopTrayUnit:        func(context.Context) error { return nil },
-			startTrayUnit:       func() error { return nil },
+			restartTrayUnit:     func(context.Context) error { return nil },
 			verifyRunningBinary: func(context.Context, string) error { return nil },
 			queryBinaryVersion: func(_ context.Context, p string) (string, error) {
 				if p == oldBin {
@@ -320,12 +318,17 @@ func TestUpgradeFromEngine(t *testing.T) {
 
 	t.Run("failed_start_or_stale_exe_rolls_back", func(t *testing.T) {
 		for _, tc := range []struct {
-			name      string
-			startErr  error
-			verifyErr error
+			name          string
+			startErr      error
+			verifyErr     error
+			rbStopErr     error
+			rbVerifyErr   error
+			wantConfirmed bool
 		}{
-			{"start_fails", errors.New("start failed"), nil},
-			{"stale_exe_detected", nil, errors.New("running service is still executing a deleted previous binary")},
+			{"start_fails_confirmed_rollback", errors.New("start failed"), nil, nil, nil, true},
+			{"stale_exe_detected_confirmed_rollback", nil, errors.New("running service is still executing a deleted previous binary"), nil, nil, true},
+			{"rollback_stop_fails_unconfirmed", errors.New("start failed"), nil, errors.New("stop failed"), nil, false},
+			{"rollback_verify_stale_unconfirmed", errors.New("start failed"), nil, nil, errors.New("stale live process"), false},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				home := t.TempDir()
@@ -337,12 +340,18 @@ func TestUpgradeFromEngine(t *testing.T) {
 				_ = client.Save(stateDir, client.State{DeviceID: "d1", Credential: "c1", Paused: false})
 				stage := setupStage(t, "new-bad")
 
-				starts := 0
+				stops, starts, verifies := 0, 0, 0
 				deps := updateDeps{
 					out:               &bytes.Buffer{},
 					defaultInstallDir: func(string) string { return installDir },
 					unitRunning:       func(context.Context) (bool, error) { return true, nil },
-					stopUnit:          func(context.Context) error { return nil },
+					stopUnit: func(context.Context) error {
+						stops++
+						if stops == 2 {
+							return tc.rbStopErr
+						}
+						return nil
+					},
 					startUnit: func(string) error {
 						starts++
 						if starts == 1 {
@@ -350,10 +359,14 @@ func TestUpgradeFromEngine(t *testing.T) {
 						}
 						return nil
 					},
-					trayUnitRunning:     func(context.Context) (bool, error) { return false, nil },
-					stopTrayUnit:        func(context.Context) error { return nil },
-					startTrayUnit:       func() error { return nil },
-					verifyRunningBinary: func(context.Context, string) error { return tc.verifyErr },
+					restartTrayUnit: func(context.Context) error { return nil },
+					verifyRunningBinary: func(context.Context, string) error {
+						verifies++
+						if tc.startErr == nil && verifies == 1 {
+							return tc.verifyErr
+						}
+						return tc.rbVerifyErr
+					},
 					queryBinaryVersion: func(_ context.Context, p string) (string, error) {
 						if p == oldBin {
 							return "v0.4.0", nil
@@ -362,16 +375,125 @@ func TestUpgradeFromEngine(t *testing.T) {
 					},
 				}
 				err := runUpgradeFrom(context.Background(), home, upgradeOptions{stagedDir: stage, installDir: installDir, stateDir: stateDir}, deps)
-				if err == nil || !strings.Contains(formatDiagnostic(err), "rolled back") {
-					t.Fatalf("expected rollback error, got %v", err)
+				if err == nil {
+					t.Fatal("expected rollback error")
 				}
-				if got, _ := os.ReadFile(oldBin); string(got) != "old-good" {
-					t.Fatalf("binary was not rolled back: %q", got)
-				}
-				if starts != 2 {
-					t.Fatalf("expected rollback restart (2 starts total), got %d", starts)
+				msg := formatDiagnostic(err)
+				if tc.wantConfirmed {
+					if !strings.Contains(msg, "rolled back to v0.4.0") {
+						t.Fatalf("expected confirmed rollback diagnostic, got %q", msg)
+					}
+					if got, _ := os.ReadFile(oldBin); string(got) != "old-good" {
+						t.Fatalf("binary was not rolled back: %q", got)
+					}
+					if starts != 2 {
+						t.Fatalf("expected rollback restart (2 starts total), got %d", starts)
+					}
+				} else {
+					if !strings.Contains(msg, "rollback could not be confirmed") || strings.Contains(msg, "rolled back to") {
+						t.Fatalf("expected unconfirmed rollback diagnostic, got %q", msg)
+					}
+					if tc.rbStopErr != nil {
+						if got, _ := os.ReadFile(oldBin); string(got) != "new-bad" {
+							t.Fatalf("must not overwrite binary when rollback stop failed: %q", got)
+						}
+					}
 				}
 			})
+		}
+	})
+
+	t.Run("upgrade_lock_serializes_concurrent_upgrades", func(t *testing.T) {
+		home := t.TempDir()
+		installDir := filepath.Join(home, "bin")
+		stateDir := filepath.Join(home, "state")
+		_ = os.MkdirAll(installDir, 0755)
+		oldBin := filepath.Join(installDir, "souls-house-companion")
+		_ = os.WriteFile(oldBin, []byte("old-v0.4.0"), 0755)
+		stage := setupStage(t, "new-v0.5.0")
+
+		held, err := acquireUpgradeLock(installDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer held.Close()
+
+		deps := updateDeps{
+			out:               &bytes.Buffer{},
+			defaultInstallDir: func(string) string { return installDir },
+			unitRunning: func(context.Context) (bool, error) {
+				t.Fatal("should not inspect unit while locked")
+				return false, nil
+			},
+			stopUnit:            func(context.Context) error { return nil },
+			startUnit:           func(string) error { return nil },
+			restartTrayUnit:     func(context.Context) error { return nil },
+			verifyRunningBinary: func(context.Context, string) error { return nil },
+			queryBinaryVersion: func(_ context.Context, p string) (string, error) {
+				if p == oldBin {
+					t.Fatal("should not inspect installed version while locked")
+				}
+				return "v0.5.0", nil
+			},
+		}
+		err = runUpgradeFrom(context.Background(), home, upgradeOptions{stagedDir: stage, installDir: installDir, stateDir: stateDir}, deps)
+		if err == nil || !strings.Contains(formatDiagnostic(err), "already in progress") {
+			t.Fatalf("expected concurrent upgrade refusal, got %v", err)
+		}
+	})
+
+	t.Run("install_dir_follows_existing_unit_and_refuses_mismatch", func(t *testing.T) {
+		home := t.TempDir()
+		customDir := filepath.Join(home, "custom-bin")
+		otherDir := filepath.Join(home, "other-bin")
+		stateDir := filepath.Join(home, "state")
+		_ = os.MkdirAll(customDir, 0755)
+		customBin := filepath.Join(customDir, "souls-house-companion")
+		_ = os.WriteFile(customBin, []byte("old-custom"), 0755)
+		stage := setupStage(t, "new-v0.5.0")
+
+		deps := updateDeps{
+			out:               &bytes.Buffer{},
+			defaultInstallDir: func(string) string { return filepath.Join(home, ".local", "bin") },
+			installedUnitBinaryPath: func(string) (string, bool, error) {
+				return customBin, true, nil
+			},
+			unitRunning:         func(context.Context) (bool, error) { return false, nil },
+			stopUnit:            func(context.Context) error { return nil },
+			startUnit:           func(string) error { return nil },
+			restartTrayUnit:     func(context.Context) error { return nil },
+			verifyRunningBinary: func(context.Context, string) error { return nil },
+			queryBinaryVersion: func(_ context.Context, p string) (string, error) {
+				if p == customBin {
+					return "aae878c", nil
+				}
+				return "v0.5.0", nil
+			},
+		}
+
+		// Explicit --install-dir disagreeing with unit's ExecStart is refused.
+		err := runUpgradeFrom(context.Background(), home, upgradeOptions{
+			stagedDir:          stage,
+			installDir:         otherDir,
+			installDirExplicit: true,
+			stateDir:           stateDir,
+		}, deps)
+		if err == nil || !strings.Contains(formatDiagnostic(err), "disagrees with installed service unit") {
+			t.Fatalf("expected install-dir mismatch refusal, got %v", err)
+		}
+
+		// Omitting --install-dir automatically targets the unit's ExecStart directory.
+		if err := runUpgradeFrom(context.Background(), home, upgradeOptions{
+			stagedDir: stage,
+			stateDir:  stateDir,
+		}, deps); err != nil {
+			t.Fatalf("upgrade using unit ExecStart dir failed: %v", err)
+		}
+		if got, _ := os.ReadFile(customBin); string(got) != "new-v0.5.0" {
+			t.Fatalf("custom unit binary was not upgraded: %q", got)
+		}
+		if prev, _ := os.ReadFile(customBin + ".previous"); string(prev) != "old-custom" {
+			t.Fatalf("custom .previous missing: %q", prev)
 		}
 	})
 }

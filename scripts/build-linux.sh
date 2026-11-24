@@ -41,7 +41,7 @@ for arch in amd64 arm64; do
   trap - EXIT HUP INT TERM
   echo "linux/$arch: ELF machine $got ok"
 done
-sed "s|@@RELEASE_VERSION@@|$version|g" scripts/install-linux.sh > "$out/install-linux.sh"
+sed "s|^RELEASE_VERSION=\"\"$|RELEASE_VERSION=\"$version\"|" scripts/install-linux.sh > "$out/install-linux.sh"
 chmod 755 "$out/install-linux.sh"
 (cd "$out" && sha256sum ./*-linux-*.tar.gz ./install-linux.sh | sed 's# \./# #' > SHA256SUMS)
 cat "$out/SHA256SUMS"

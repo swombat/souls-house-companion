@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"image/png"
 	"os"
@@ -75,6 +76,21 @@ func TestParseUpdateCheck(t *testing.T) {
 	garbage := parseUpdateCheck([]byte(`not json`), nil)
 	if garbage.available {
 		t.Fatalf("expected garbage to fail quiet, got %+v", garbage)
+	}
+}
+
+func TestBuildUpdateCommandUsesSystemdRun(t *testing.T) {
+	cmd := buildUpdateCommand(context.Background(), "/home/u/.local/bin/souls-house-companion", "/usr/bin/systemd-run")
+	joined := strings.Join(cmd.Args, " ")
+	for _, want := range []string{"/usr/bin/systemd-run", "--user", "--collect", "--wait", "--property=Type=oneshot", "-- /home/u/.local/bin/souls-house-companion update"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected %q in systemd-run update command, got %q", want, joined)
+		}
+	}
+
+	direct := buildUpdateCommand(context.Background(), "/home/u/.local/bin/souls-house-companion", "")
+	if strings.Join(direct.Args, " ") != "/home/u/.local/bin/souls-house-companion update" {
+		t.Fatalf("unexpected direct fallback command: %v", direct.Args)
 	}
 }
 

@@ -12,44 +12,43 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/swombat/souls-house-companion/internal/client"
 )
 
 type updateDeps struct {
-	out                 io.Writer
-	httpClient          *http.Client
-	releaseAPIURL       string
-	enforceReleaseHosts bool
-	currentVersion      string
-	defaultInstallDir   func(home string) string
-	unitRunning         func(context.Context) (bool, error)
-	stopUnit            func(context.Context) error
-	startUnit           func(string) error
-	trayUnitRunning     func(context.Context) (bool, error)
-	stopTrayUnit        func(context.Context) error
-	startTrayUnit       func() error
-	verifyRunningBinary func(ctx context.Context, expectedBin string) error
-	queryBinaryVersion  func(ctx context.Context, binPath string) (string, error)
+	out                     io.Writer
+	httpClient              *http.Client
+	releaseAPIURL           string
+	enforceReleaseHosts     bool
+	currentVersion          string
+	defaultInstallDir       func(home string) string
+	installedUnitBinaryPath func(home string) (string, bool, error)
+	unitRunning             func(context.Context) (bool, error)
+	stopUnit                func(context.Context) error
+	startUnit               func(string) error
+	restartTrayUnit         func(context.Context) error
+	verifyRunningBinary     func(ctx context.Context, expectedBin string) error
+	queryBinaryVersion      func(ctx context.Context, binPath string) (string, error)
 }
 
 func defaultUpdateDeps() updateDeps {
 	return updateDeps{
-		out:                 os.Stdout,
-		httpClient:          defaultReleaseHTTPClient(),
-		releaseAPIURL:       defaultLatestReleaseURL,
-		enforceReleaseHosts: true,
-		currentVersion:      version,
-		defaultInstallDir:   defaultInstallDir,
-		unitRunning:         unitRunning,
-		stopUnit:            stopUserUnit,
-		startUnit:           startUserUnit,
-		trayUnitRunning:     trayUnitRunning,
-		stopTrayUnit:        stopTrayUnit,
-		startTrayUnit:       startTrayUnit,
-		verifyRunningBinary: verifyRunningBinary,
-		queryBinaryVersion:  queryBinaryVersionExec,
+		out:                     os.Stdout,
+		httpClient:              defaultReleaseHTTPClient(),
+		releaseAPIURL:           defaultLatestReleaseURL,
+		enforceReleaseHosts:     true,
+		currentVersion:          version,
+		defaultInstallDir:       defaultInstallDir,
+		installedUnitBinaryPath: installedUnitBinaryPath,
+		unitRunning:             unitRunning,
+		stopUnit:                stopUserUnit,
+		startUnit:               startUserUnit,
+		restartTrayUnit:         restartTrayUnit,
+		verifyRunningBinary:     verifyRunningBinary,
+		queryBinaryVersion:      queryBinaryVersionExec,
 	}
 }
 
@@ -187,6 +186,7 @@ func updateCommand(ctx context.Context, home string, args []string, d updateDeps
 	}
 
 	targetInstallDir := *installDir
+	installDirExplicit := targetInstallDir != ""
 	if targetInstallDir == "" {
 		if exe, err := os.Executable(); err == nil {
 			if resolved, err := filepath.EvalSymlinks(exe); err == nil {
@@ -199,20 +199,22 @@ func updateCommand(ctx context.Context, home string, args []string, d updateDeps
 	}
 
 	return runUpgradeFrom(ctx, home, upgradeOptions{
-		stagedDir:     stageDir,
-		installDir:    targetInstallDir,
-		stateDir:      *stateDir,
-		force:         *force,
-		targetVersion: rel.TagName,
+		stagedDir:          stageDir,
+		installDir:         targetInstallDir,
+		installDirExplicit: installDirExplicit,
+		stateDir:           *stateDir,
+		force:              *force,
+		targetVersion:      rel.TagName,
 	}, d)
 }
 
 type upgradeOptions struct {
-	stagedDir     string
-	installDir    string
-	stateDir      string
-	force         bool
-	targetVersion string // optional override when already known; otherwise queried from staged binary
+	stagedDir          string
+	installDir         string
+	installDirExplicit bool
+	stateDir           string
+	force              bool
+	targetVersion      string // optional override when already known; otherwise queried from staged binary
 }
 
 func upgradeFromCommand(ctx context.Context, home string, args []string, d updateDeps) error {
@@ -222,7 +224,7 @@ func upgradeFromCommand(ctx context.Context, home string, args []string, d updat
 	flags := flag.NewFlagSet("upgrade-from", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	stateDir := flags.String("state-dir", filepath.Join(home, ".local/share/souls-house-companion"), "private state directory")
-	installDir := flags.String("install-dir", d.defaultInstallDir(home), "directory to install binaries into")
+	installDir := flags.String("install-dir", "", "directory to install binaries into")
 	force := flags.Bool("force", false, "allow reinstalling the same version or downgrading")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -233,12 +235,37 @@ func upgradeFromCommand(ctx context.Context, home string, args []string, d updat
 	if flags.NArg() != 1 {
 		return newUserError("companion upgrade-from: staged directory path required", nil)
 	}
+	dir := *installDir
+	explicit := dir != ""
+	if dir == "" {
+		dir = d.defaultInstallDir(home)
+	}
 	return runUpgradeFrom(ctx, home, upgradeOptions{
-		stagedDir:  flags.Arg(0),
-		installDir: *installDir,
-		stateDir:   *stateDir,
-		force:      *force,
+		stagedDir:          flags.Arg(0),
+		installDir:         dir,
+		installDirExplicit: explicit,
+		stateDir:           *stateDir,
+		force:              *force,
 	}, d)
+}
+
+func acquireUpgradeLock(installDir string) (*os.File, error) {
+	if err := os.MkdirAll(installDir, 0755); err != nil {
+		return nil, err
+	}
+	lockPath := filepath.Join(installDir, ".souls-house-upgrade.lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, newUserError("companion upgrade: another upgrade is already in progress", err)
+		}
+		return nil, err
+	}
+	return f, nil
 }
 
 // runUpgradeFrom is the single shared upgrade engine used by both
@@ -249,14 +276,44 @@ func runUpgradeFrom(ctx context.Context, home string, opts upgradeOptions, d upd
 	if err != nil {
 		return err
 	}
-	installDir, err := filepath.Abs(opts.installDir)
+	targetDir := opts.installDir
+	if targetDir == "" {
+		targetDir = d.defaultInstallDir(home)
+	}
+	installDir, err := filepath.Abs(targetDir)
 	if err != nil {
 		return err
+	}
+	if d.installedUnitBinaryPath != nil {
+		unitBin, hasUnit, err := d.installedUnitBinaryPath(home)
+		if err != nil {
+			return newUserError("companion upgrade: could not inspect existing service unit ExecStart", err)
+		}
+		if hasUnit {
+			unitDir := filepath.Clean(filepath.Dir(unitBin))
+			if opts.installDirExplicit && filepath.Clean(installDir) != unitDir {
+				return newUserError(
+					fmt.Sprintf("companion upgrade: --install-dir (%s) disagrees with installed service unit directory (%s)", installDir, unitDir),
+					nil,
+				)
+			}
+			if !opts.installDirExplicit {
+				installDir = unitDir
+			}
+		}
 	}
 	absStateDir, err := filepath.Abs(opts.stateDir)
 	if err != nil {
 		return err
 	}
+
+	// Serialize all local upgrades targeting installDir before inspecting the
+	// installed version or .previous backup, independent of the daemon's state lock.
+	upgradeLock, err := acquireUpgradeLock(installDir)
+	if err != nil {
+		return err
+	}
+	defer upgradeLock.Close()
 
 	stagedCompanion := filepath.Join(stagedDir, "souls-house-companion")
 	if err := requireRegularFile(stagedCompanion); err != nil {
@@ -318,7 +375,6 @@ func runUpgradeFrom(ctx context.Context, home string, opts upgradeOptions, d upd
 
 	paused := isDevicePaused(absStateDir)
 	companionWasRunning := false
-	trayWasRunning := false
 	if hadInstalled && !paused {
 		checkCtx, cancel := context.WithTimeout(ctx, systemctlTimeout)
 		running, err := d.unitRunning(checkCtx)
@@ -332,14 +388,6 @@ func runUpgradeFrom(ctx context.Context, home string, opts upgradeOptions, d upd
 			companionWasRunning = running
 		}
 	}
-	if hadInstalled && hasStagedTray {
-		checkCtx, cancel := context.WithTimeout(ctx, systemctlTimeout)
-		running, err := d.trayUnitRunning(checkCtx)
-		cancel()
-		if err == nil {
-			trayWasRunning = running
-		}
-	}
 
 	unit := userUnitPath(home)
 	if companionWasRunning {
@@ -350,24 +398,10 @@ func runUpgradeFrom(ctx context.Context, home string, opts upgradeOptions, d upd
 			return stopErr
 		}
 	}
-	if trayWasRunning {
-		stopCtx, cancel := context.WithTimeout(ctx, systemctlTimeout)
-		stopErr := d.stopTrayUnit(stopCtx)
-		cancel()
-		if stopErr != nil {
-			if companionWasRunning && !isDevicePaused(absStateDir) {
-				_ = d.startUnit(unit)
-			}
-			return stopErr
-		}
-	}
 
 	if err := os.MkdirAll(installDir, 0755); err != nil {
 		if companionWasRunning && !isDevicePaused(absStateDir) {
 			_ = d.startUnit(unit)
-		}
-		if trayWasRunning {
-			_ = d.startTrayUnit()
 		}
 		return err
 	}
@@ -377,9 +411,6 @@ func runUpgradeFrom(ctx context.Context, home string, opts upgradeOptions, d upd
 		if companionWasRunning && !isDevicePaused(absStateDir) {
 			_ = d.startUnit(unit)
 		}
-		if trayWasRunning {
-			_ = d.startTrayUnit()
-		}
 		return newUserError("companion upgrade: failed to install souls-house-companion binary", err)
 	}
 
@@ -388,16 +419,23 @@ func runUpgradeFrom(ctx context.Context, home string, opts upgradeOptions, d upd
 	if hasStagedTray {
 		backedUpTray, err = installBinaryWithBackup(stagedTray, destTray)
 		if err != nil {
+			var rbRestoreErr, rbStartErr, rbVerifyErr error
 			if backedUpCompanion {
-				_ = restoreFromPrevious(destCompanion)
+				rbRestoreErr = restoreFromPrevious(destCompanion)
 			}
-			if companionWasRunning && !isDevicePaused(absStateDir) {
-				_ = d.startUnit(unit)
+			if rbRestoreErr == nil && companionWasRunning && !isDevicePaused(absStateDir) {
+				rbStartErr = d.startUnit(unit)
+				if rbStartErr == nil {
+					vCtx, vCancel := context.WithTimeout(ctx, systemctlTimeout)
+					rbVerifyErr = d.verifyRunningBinary(vCtx, destCompanion)
+					vCancel()
+				}
 			}
-			if trayWasRunning {
-				_ = d.startTrayUnit()
+			cause := errors.Join(err, rbRestoreErr, rbStartErr, rbVerifyErr)
+			if rbRestoreErr == nil && rbStartErr == nil && rbVerifyErr == nil {
+				return newUserError("companion upgrade: failed to install souls-house-tray binary; rolled back", cause)
 			}
-			return newUserError("companion upgrade: failed to install souls-house-tray binary; rolled back", err)
+			return newUserError("companion upgrade: failed to install souls-house-tray binary and rollback could not be confirmed; check service status", cause)
 		}
 		swappedTray = true
 	}
@@ -412,40 +450,49 @@ func runUpgradeFrom(ctx context.Context, home string, opts upgradeOptions, d upd
 			vCancel()
 		}
 		if startErr != nil || verifyErr != nil {
-			// Roll back to .previous and restart the previous service (unless paused).
+			// Require a confirmed stop before restoring .previous, then verify
+			// the restored binary is actually running after restart.
 			stopCtx, cancel := context.WithTimeout(ctx, systemctlTimeout)
-			_ = d.stopUnit(stopCtx)
+			rbStopErr := d.stopUnit(stopCtx)
 			cancel()
-			var rbErr error
-			if backedUpCompanion {
-				rbErr = errors.Join(rbErr, restoreFromPrevious(destCompanion))
-			}
-			if swappedTray && backedUpTray {
-				rbErr = errors.Join(rbErr, restoreFromPrevious(destTray))
-			}
-			var rbStartErr error
-			if !isDevicePaused(absStateDir) {
-				rbStartErr = d.startUnit(unit)
-				if trayWasRunning {
-					_ = d.startTrayUnit()
+			var rbErr, rbStartErr, rbVerifyErr error
+			if rbStopErr == nil {
+				if backedUpCompanion {
+					rbErr = errors.Join(rbErr, restoreFromPrevious(destCompanion))
+				}
+				if swappedTray && backedUpTray {
+					rbErr = errors.Join(rbErr, restoreFromPrevious(destTray))
+				}
+				if rbErr == nil && !isDevicePaused(absStateDir) {
+					rbStartErr = d.startUnit(unit)
+					if rbStartErr == nil {
+						vCtx, vCancel := context.WithTimeout(ctx, systemctlTimeout)
+						rbVerifyErr = d.verifyRunningBinary(vCtx, destCompanion)
+						vCancel()
+					}
 				}
 			}
-			cause := errors.Join(startErr, verifyErr, rbErr, rbStartErr)
-			if rbErr == nil && rbStartErr == nil {
+			cause := errors.Join(startErr, verifyErr, rbStopErr, rbErr, rbStartErr, rbVerifyErr)
+			if rbStopErr == nil && rbErr == nil && rbStartErr == nil && rbVerifyErr == nil {
 				return newUserError(
 					fmt.Sprintf("companion upgrade: upgraded service failed to start or verify; rolled back to %s", sanitizeToken(installedVer)),
 					cause,
 				)
 			}
 			return newUserError(
-				"companion upgrade: upgraded service failed to start and rollback encountered an error; check service status",
+				"companion upgrade: upgraded service failed to start and rollback could not be confirmed; check service status",
 				cause,
 			)
 		}
 	}
 
-	if trayWasRunning {
-		_ = d.startTrayUnit()
+	// Restart the tray only after the companion has been verified, using
+	// try-restart --no-block so an updater launched from the tray cannot kill
+	// itself before the companion upgrade finishes.
+	if hasStagedTray && d.restartTrayUnit != nil {
+		rCtx, rCancel := context.WithTimeout(ctx, systemctlTimeout)
+		_ = d.restartTrayUnit(rCtx)
+		rCancel()
 	}
 
 	if hadInstalled {

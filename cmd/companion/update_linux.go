@@ -27,20 +27,72 @@ func releaseAssetName(ver string) (string, error) {
 	}
 }
 
-func trayUnitRunning(ctx context.Context) (bool, error) {
-	state, err := inspectUnit(ctx, trayUnit)
-	if err != nil {
-		return false, err
+func restartTrayUnit(ctx context.Context) error {
+	// Use try-restart --no-block as the final step after the companion is
+	// verified: renaming over a running tray binary is safe on Linux (the old
+	// process keeps its inode), and never stopping the tray mid-upgrade avoids
+	// killing an updater launched from the tray's cgroup.
+	_, err := systemctlOutput(ctx, "try-restart", "--no-block", trayUnit)
+	return err
+}
+
+// installedUnitBinaryPath parses ExecStart= from the installed companion
+// systemd user unit if present, returning the executable path.
+func installedUnitBinaryPath(home string) (string, bool, error) {
+	path := userUnitPath(home)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return "", false, nil
 	}
-	return state.running(), nil
+	if err != nil {
+		return "", false, err
+	}
+	if !info.Mode().IsRegular() {
+		return "", false, errors.New("companion unit file is not a regular file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false, err
+	}
+	return parseSystemdExecStartBinary(string(data))
 }
 
-func stopTrayUnit(ctx context.Context) error {
-	return stopUnit(ctx, trayUnit)
-}
-
-func startTrayUnit() error {
-	return systemctl("start", trayUnit)
+func parseSystemdExecStartBinary(content string) (string, bool, error) {
+	for _, rawLine := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if !strings.HasPrefix(line, "ExecStart=") {
+			continue
+		}
+		val := strings.TrimSpace(strings.TrimPrefix(line, "ExecStart="))
+		if val == "" {
+			continue
+		}
+		// Strip optional systemd ExecStart prefixes (@, -, :, +, !).
+		val = strings.TrimLeft(val, "@-:+!")
+		if val == "" {
+			continue
+		}
+		if val[0] == '"' {
+			end := strings.IndexByte(val[1:], '"')
+			if end < 0 {
+				return "", false, errors.New("malformed quoted ExecStart in unit file")
+			}
+			exe := val[1 : 1+end]
+			if !filepath.IsAbs(exe) {
+				return "", false, errors.New("non-absolute ExecStart in unit file")
+			}
+			return exe, true, nil
+		}
+		fields := strings.Fields(val)
+		if len(fields) == 0 || !filepath.IsAbs(fields[0]) {
+			return "", false, errors.New("non-absolute ExecStart in unit file")
+		}
+		return fields[0], true, nil
+	}
+	return "", false, nil
 }
 
 func queryUnitActiveAndPID(ctx context.Context, unitName string) (string, int, error) {

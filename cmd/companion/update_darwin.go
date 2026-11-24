@@ -16,9 +16,10 @@ func releaseAssetName(ver string) (string, error) {
 	return "", errors.New("self-update CLI is currently Linux-only; on macOS, download the signed souls.house app")
 }
 
-func trayUnitRunning(_ context.Context) (bool, error) { return false, nil }
-func stopTrayUnit(_ context.Context) error            { return nil }
-func startTrayUnit() error                            { return nil }
+func restartTrayUnit(_ context.Context) error { return nil }
+func installedUnitBinaryPath(_ string) (string, bool, error) {
+	return "", false, nil
+}
 
 func verifyRunningBinary(ctx context.Context, _ string) error {
 	running, err := unitRunning(ctx)
