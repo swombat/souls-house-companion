@@ -27,7 +27,7 @@ for arch in amd64 arm64; do
   CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
     -ldflags="-s -w -X main.version=$version" -o "$stage/$name/souls-house-companion" ./cmd/companion
   CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
-    -ldflags="-s -w" -o "$stage/$name/souls-house-tray" ./cmd/tray
+    -ldflags="-s -w -X main.version=$version" -o "$stage/$name/souls-house-tray" ./cmd/tray
   for bin in souls-house-companion souls-house-tray; do
     got=$(elf_machine "$stage/$name/$bin")
     [ "$got" = "$want" ] || { echo "linux/$arch $bin: ELF machine $got, want $want" >&2; exit 1; }
@@ -41,5 +41,7 @@ for arch in amd64 arm64; do
   trap - EXIT HUP INT TERM
   echo "linux/$arch: ELF machine $got ok"
 done
-(cd "$out" && sha256sum ./*-linux-*.tar.gz | sed 's# \./# #' > SHA256SUMS)
+sed "s|^RELEASE_VERSION=\"\"$|RELEASE_VERSION=\"$version\"|" scripts/install-linux.sh > "$out/install-linux.sh"
+chmod 755 "$out/install-linux.sh"
+(cd "$out" && sha256sum ./*-linux-*.tar.gz ./install-linux.sh | sed 's# \./# #' > SHA256SUMS)
 cat "$out/SHA256SUMS"

@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"image/png"
 	"os"
@@ -56,6 +57,40 @@ func TestParseStatus(t *testing.T) {
 	empty := parseStatus([]byte(`{"paused":false,"enrolled":true,"ceiling":{"residents":[]}}`), nil, true)
 	if empty.hasResidents || empty.commandsAllowed || empty.canToggleCommands() {
 		t.Fatalf("expected cannot toggle commands with no paired residents: %+v", empty)
+	}
+}
+
+func TestParseUpdateCheck(t *testing.T) {
+	avail := parseUpdateCheck([]byte(`{"current":"v0.1.0","latest":"v0.2.0","update_available":true}`), nil)
+	if !avail.available || avail.latest != "v0.2.0" || avail.menuTitle() != "Update available (v0.2.0)" {
+		t.Fatalf("unexpected available update: %+v title=%q", avail, avail.menuTitle())
+	}
+	current := parseUpdateCheck([]byte(`{"current":"v0.2.0","latest":"v0.2.0","update_available":false}`), nil)
+	if current.available {
+		t.Fatalf("expected no update available, got %+v", current)
+	}
+	failed := parseUpdateCheck([]byte(`{"latest":"v0.2.0","update_available":true}`), errors.New("offline"))
+	if failed.available {
+		t.Fatalf("expected error to fail quiet, got %+v", failed)
+	}
+	garbage := parseUpdateCheck([]byte(`not json`), nil)
+	if garbage.available {
+		t.Fatalf("expected garbage to fail quiet, got %+v", garbage)
+	}
+}
+
+func TestBuildUpdateCommandUsesSystemdRun(t *testing.T) {
+	cmd := buildUpdateCommand(context.Background(), "/home/u/.local/bin/souls-house-companion", "/usr/bin/systemd-run")
+	joined := strings.Join(cmd.Args, " ")
+	for _, want := range []string{"/usr/bin/systemd-run", "--user", "--collect", "--wait", "--property=Type=oneshot", "-- /home/u/.local/bin/souls-house-companion update"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected %q in systemd-run update command, got %q", want, joined)
+		}
+	}
+
+	direct := buildUpdateCommand(context.Background(), "/home/u/.local/bin/souls-house-companion", "")
+	if strings.Join(direct.Args, " ") != "/home/u/.local/bin/souls-house-companion update" {
+		t.Fatalf("unexpected direct fallback command: %v", direct.Args)
 	}
 }
 

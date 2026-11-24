@@ -76,6 +76,24 @@ func run(args []string) error {
 		defer stop()
 		return commandsCommand(ctx, home, args[1:], defaultCommandsDeps())
 	}
+	if args[0] == "update" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		return updateCommand(ctx, home, args[1:], defaultUpdateDeps())
+	}
+	if args[0] == "upgrade-from" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		return upgradeFromCommand(ctx, home, args[1:], defaultUpdateDeps())
+	}
 	if args[0] == "version" {
 		if len(args) > 1 && isHelpFlag(args[1]) {
 			return writeHelp(os.Stdout, "version")
