@@ -5,6 +5,7 @@ package client
 import (
 	"testing"
 
+	"github.com/swombat/souls-house-companion/internal/policy"
 	"github.com/swombat/souls-house-companion/internal/runner"
 )
 
@@ -12,11 +13,11 @@ import (
 // changed one is reported as false, never omitted.
 func TestDarwinReportsTheOptInExactly(t *testing.T) {
 	for _, s := range []string{"", "darwin-v0", runner.Lifecycle + "-changed"} {
-		if r := executeLifecycleReport(s); r == nil || *r {
+		if r := executeLifecycleReport(s, policy.Policy{}, policy.Policy{}); r == nil || *r {
 			t.Fatalf("contract %q reported as %v", s, r)
 		}
 	}
-	if r := executeLifecycleReport(runner.Lifecycle); r == nil || !*r {
+	if r := executeLifecycleReport(runner.Lifecycle, policy.Policy{}, policy.Policy{}); r == nil || !*r {
 		t.Fatal("accepted contract not reported as true")
 	}
 }

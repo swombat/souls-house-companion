@@ -1,16 +1,15 @@
 package main
 
 import (
-	"runtime"
-
 	"github.com/swombat/souls-house-companion/internal/policy"
 )
 
-// On macOS "Let residents run commands on this Mac" is the owner's whole
-// local say over commands, so accepting or revoking the lifecycle writes the
-// per-resident execute flag too. On Linux the flag stays a separate local
-// control set with `policy apply`, and the lifecycle never touches it.
-const switchWritesLocalExecute = runtime.GOOS == "darwin"
+// Both macOS and Linux support --paired-residents on execute-lifecycle so the
+// owner's local Run-commands toggle can set or clear per-resident execute
+// across already-paired residents without touching volumes or adding residents.
+// On Linux, per-resident policy apply continues to work independently and
+// Linux's runtime execute gate does not require ExecuteLifecycle to be set.
+const switchWritesLocalExecute = true
 
 // withLocalExecute returns the ceiling with execute set to allow for every
 // resident already in it. It never adds a resident, never touches volumes,

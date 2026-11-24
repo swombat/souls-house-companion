@@ -330,7 +330,7 @@ func (c *Client) runOnce(ctx context.Context, state *State, shutdownGrace time.D
 			// accepting or revoking needs the state lock, so it always happens
 			// across a pause and a new connection, which reports again.
 			if frame, err := ceilingReportFrame(identifier, epoch, connectionState.Ceiling, request.Policy,
-				executeLifecycleReport(connectionState.ExecuteLifecycle)); err != nil ||
+				executeLifecycleReport(connectionState.ExecuteLifecycle, connectionState.Ceiling, request.Policy)); err != nil ||
 				conn.Write(ctx, websocket.MessageText, frame) != nil {
 				return ErrTransport
 			}

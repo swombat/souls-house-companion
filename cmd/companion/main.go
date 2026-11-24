@@ -67,6 +67,15 @@ func run(args []string) error {
 		defer stop()
 		return setupCommand(ctx, home, args[1:], defaultSetupDeps(home))
 	}
+	if args[0] == "commands" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		return commandsCommand(ctx, home, args[1:], defaultCommandsDeps())
+	}
 	if args[0] == "version" {
 		if len(args) > 1 && isHelpFlag(args[1]) {
 			return writeHelp(os.Stdout, "version")
@@ -113,7 +122,7 @@ func run(args []string) error {
 	user := flags.Bool("user", false, "install ordinary user unit only")
 	contract := flags.String("accept-contract", "", "explicit local acceptance of versioned execute lifecycle; see docs/macos.md")
 	revokeContract := flags.Bool("revoke", false, "revoke local execute lifecycle acceptance (pause first)")
-	pairedResidents := flags.Bool("paired-residents", false, "execute-lifecycle (macOS): also set the local execute flag for every paired resident, on with --accept-contract, off with --revoke; the menu passes this after the owner confirms")
+	pairedResidents := flags.Bool("paired-residents", false, "execute-lifecycle: also set the local execute flag for every paired resident, on with --accept-contract, off with --revoke")
 	requestAccessibility := flags.Bool("request", false, "accessibility: ask the running service to request macOS Accessibility")
 	_ = flags.Bool("json", false, "machine-readable status")
 	pairName := flags.String("name", "", "pair: name shown to the house owner")
@@ -315,18 +324,8 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		// Record the authority act before committing it. Do not record paths,
-		// credential values or file contents in this safe local audit.
-		audit, err := os.OpenFile(filepath.Join(*dir, "audit.jsonl"),
-			os.O_WRONLY|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW, 0600)
-		if err != nil {
+		if err := recordPolicyAudit(*dir, time.Now()); err != nil {
 			return err
-		}
-		_, writeErr := fmt.Fprintf(audit, "{\"event\":\"policy.apply\",\"time\":%q}\n", time.Now().UTC().Format(time.RFC3339Nano))
-		syncErr := audit.Sync()
-		audit.Close()
-		if writeErr != nil || syncErr != nil {
-			return errors.New("policy audit failed")
 		}
 		return client.Save(*dir, state)
 	case "pause", "resume":

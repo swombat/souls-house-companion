@@ -43,6 +43,20 @@ func TestParseStatus(t *testing.T) {
 	if tip := (snapshot{reachable: true, active: true}).tooltip(); tip != "souls.house: companion running" {
 		t.Errorf("tooltip %q", tip)
 	}
+
+	// Commands readiness parsed from status --json ceiling.residents.
+	off := parseStatus([]byte(`{"paused":false,"enrolled":true,"ceiling":{"residents":[{"id":"r1","execute":false}]}}`), nil, true)
+	if !off.hasResidents || off.commandsAllowed || !off.canToggleCommands() {
+		t.Fatalf("expected residents present with commands off: %+v", off)
+	}
+	on := parseStatus([]byte(`{"paused":false,"enrolled":true,"ceiling":{"residents":[{"id":"r1","execute":true},{"id":"r2","execute":false}]}}`), nil, true)
+	if !on.hasResidents || !on.commandsAllowed || !on.canToggleCommands() {
+		t.Fatalf("expected commands on when any resident has execute: %+v", on)
+	}
+	empty := parseStatus([]byte(`{"paused":false,"enrolled":true,"ceiling":{"residents":[]}}`), nil, true)
+	if empty.hasResidents || empty.commandsAllowed || empty.canToggleCommands() {
+		t.Fatalf("expected cannot toggle commands with no paired residents: %+v", empty)
+	}
 }
 
 // A fake systemctl on PATH that records its arguments and fails when told to.

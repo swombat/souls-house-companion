@@ -46,19 +46,39 @@ func TestWithLocalExecuteAllowsOnlyResidentsAlreadyInTheCeiling(t *testing.T) {
 	}
 }
 
-func TestPairedResidentsFlagRefusedOffMac(t *testing.T) {
-	if switchWritesLocalExecute {
-		t.Skip("macOS: covered by TestDarwinRunCommandsSwitchWritesLocalExecute")
-	}
+func TestPairedResidentsFlagWorksOnLinuxAndMac(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
-	if err := client.Save(dir, client.State{}); err != nil {
+	if err := client.Save(dir, client.State{Ceiling: pairedCeiling()}); err != nil {
 		t.Fatal(err)
 	}
-	err := run([]string{"execute-lifecycle", "--accept-contract", runner.Lifecycle, "--paired-residents", "--state-dir", dir})
-	if err == nil {
-		t.Fatal("--paired-residents accepted off macOS")
+	if err := run([]string{"execute-lifecycle", "--accept-contract", runner.Lifecycle, "--paired-residents", "--state-dir", dir}); err != nil {
+		t.Fatalf("execute-lifecycle --paired-residents on failed: %v", err)
 	}
-	if state, _ := client.Load(dir); state.ExecuteLifecycle != "" {
-		t.Fatal("refused command still accepted the lifecycle")
+	state, err := client.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ExecuteLifecycle != runner.Lifecycle {
+		t.Fatalf("lifecycle not accepted: %q", state.ExecuteLifecycle)
+	}
+	for _, r := range state.Ceiling.Residents {
+		if !r.Execute || len(r.Volumes) != 1 {
+			t.Fatalf("expected execute=true and volumes preserved: %+v", r)
+		}
+	}
+	if err := run([]string{"execute-lifecycle", "--revoke", "--paired-residents", "--state-dir", dir}); err != nil {
+		t.Fatalf("execute-lifecycle --revoke --paired-residents failed: %v", err)
+	}
+	state, err = client.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ExecuteLifecycle != "" {
+		t.Fatalf("lifecycle not revoked: %q", state.ExecuteLifecycle)
+	}
+	for _, r := range state.Ceiling.Residents {
+		if r.Execute || len(r.Volumes) != 1 {
+			t.Fatalf("expected execute=false and volumes preserved: %+v", r)
+		}
 	}
 }
