@@ -100,8 +100,8 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 			t.Fatalf("report carries more than it should: %s", frame.Data)
 		}
 	}
-	if strings.Contains(string(keys["ceiling"]), "execute") || strings.Contains(frame.Data, "desktop") {
-		t.Fatalf("report carries more than volume keys and access: %s", frame.Data)
+	if strings.Contains(frame.Data, "desktop") {
+		t.Fatalf("report carries desktop state it should not: %s", frame.Data)
 	}
 	var data struct {
 		Action  string `json:"action"`
@@ -109,6 +109,7 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 		Ceiling struct {
 			Residents []struct {
 				ID      string           `json:"id"`
+				Execute bool             `json:"execute"`
 				Volumes []reportedVolume `json:"volumes"`
 			} `json:"residents"`
 		} `json:"ceiling"`
@@ -122,13 +123,13 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 	// resA keeps every locally allowed volume, including home-uuid that the
 	// house has off: those are the choices the owner page offers.
 	a, b := data.Ceiling.Residents[0], data.Ceiling.Residents[1]
-	if a.ID != "resA" || len(a.Volumes) != 2 || a.Volumes[0] != (reportedVolume{"data-uuid", policy.Write}) ||
+	if a.ID != "resA" || !a.Execute || len(a.Volumes) != 2 || a.Volumes[0] != (reportedVolume{"data-uuid", policy.Write}) ||
 		a.Volumes[1] != (reportedVolume{"home-uuid", policy.Read}) {
 		t.Fatalf("wrong volumes for resA: %+v", a)
 	}
 	// An empty list stays a list, so the house can tell "nothing allowed"
 	// from "not reported".
-	if b.ID != "resB" || b.Volumes == nil || len(b.Volumes) != 0 || !strings.Contains(frame.Data, `"volumes":[]`) {
+	if b.ID != "resB" || b.Execute || b.Volumes == nil || len(b.Volumes) != 0 || !strings.Contains(frame.Data, `"volumes":[]`) {
 		t.Fatalf("empty ceiling not reported as an empty list: %s", frame.Data)
 	}
 }

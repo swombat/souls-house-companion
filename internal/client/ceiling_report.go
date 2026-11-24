@@ -14,12 +14,14 @@ type reportedVolume struct {
 
 type reportedResident struct {
 	ID      string           `json:"id"`
+	Execute bool             `json:"execute"`
 	Volumes []reportedVolume `json:"volumes"`
 }
 
 // ceilingReportFrame builds the one Action Cable message that tells the house
-// which volumes this Mac's local ceiling allows each resident. It carries
-// volume keys and access only: no paths, no per-resident execute flag,
+// which volumes and command execution each enrolled resident's local ceiling
+// allows. It carries volume keys, access, and the per-resident execute boolean
+// only: no paths, no desktop apps,
 // nothing else from local state. The house keeps it as a display snapshot for
 // this epoch; the ceiling itself stays here and is what every request is
 // checked against.
@@ -52,7 +54,7 @@ func ceilingReportFrame(identifier, epoch string, ceiling, enrolled policy.Polic
 		for _, g := range r.Volumes {
 			volumes = append(volumes, reportedVolume{Volume: g.Volume, Access: g.Access})
 		}
-		residents = append(residents, reportedResident{ID: r.ID, Volumes: volumes})
+		residents = append(residents, reportedResident{ID: r.ID, Execute: r.Execute, Volumes: volumes})
 	}
 	report := map[string]any{
 		"action":           "report_ceiling",
