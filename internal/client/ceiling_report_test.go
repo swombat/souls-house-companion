@@ -15,8 +15,8 @@ import (
 )
 
 // The house learns the local ceiling only from this report: once per
-// connection, after "ready", carrying that epoch, with volume keys and access
-// and nothing else from local state.
+// connection, after "ready", carrying that epoch, with volume keys, access,
+// and per-resident execute, and nothing else from local state.
 func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 	frames := make(chan []byte, 4)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -83,8 +83,8 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 	if strings.Contains(string(raw), "resX") || strings.Contains(string(raw), "outsider-only-key") {
 		t.Fatalf("report disclosed a resident not enrolled on this device: %s", raw)
 	}
-	// Per resident, only volume keys and access. The one device-level extra
-	// is execute_lifecycle_accepted, and only on macOS (see below).
+	// Per resident, only volume keys, access, and execute. The one device-level
+	// extra is execute_lifecycle_accepted, and only on macOS (see below).
 	var keys map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(frame.Data), &keys); err != nil {
 		t.Fatal(err)
@@ -100,8 +100,8 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 			t.Fatalf("report carries more than it should: %s", frame.Data)
 		}
 	}
-	if strings.Contains(string(keys["ceiling"]), "execute") || strings.Contains(frame.Data, "desktop") {
-		t.Fatalf("report carries more than volume keys and access: %s", frame.Data)
+	if strings.Contains(frame.Data, "desktop") {
+		t.Fatalf("report carries desktop state it should not: %s", frame.Data)
 	}
 	var data struct {
 		Action  string `json:"action"`
@@ -109,6 +109,7 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 		Ceiling struct {
 			Residents []struct {
 				ID      string           `json:"id"`
+				Execute *bool            `json:"execute"`
 				Volumes []reportedVolume `json:"volumes"`
 			} `json:"residents"`
 		} `json:"ceiling"`
@@ -122,14 +123,15 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 	// resA keeps every locally allowed volume, including home-uuid that the
 	// house has off: those are the choices the owner page offers.
 	a, b := data.Ceiling.Residents[0], data.Ceiling.Residents[1]
-	if a.ID != "resA" || len(a.Volumes) != 2 || a.Volumes[0] != (reportedVolume{"data-uuid", policy.Write}) ||
+	if a.ID != "resA" || a.Execute == nil || !*a.Execute || len(a.Volumes) != 2 || a.Volumes[0] != (reportedVolume{"data-uuid", policy.Write}) ||
 		a.Volumes[1] != (reportedVolume{"home-uuid", policy.Read}) {
 		t.Fatalf("wrong volumes for resA: %+v", a)
 	}
-	// An empty list stays a list, so the house can tell "nothing allowed"
-	// from "not reported".
-	if b.ID != "resB" || b.Volumes == nil || len(b.Volumes) != 0 || !strings.Contains(frame.Data, `"volumes":[]`) {
-		t.Fatalf("empty ceiling not reported as an empty list: %s", frame.Data)
+	// An empty list stays a list and execute stays an explicit false, so the
+	// house can tell "nothing allowed" / "commands off" from "not reported".
+	if b.ID != "resB" || b.Execute == nil || *b.Execute || b.Volumes == nil || len(b.Volumes) != 0 ||
+		!strings.Contains(frame.Data, `"execute":false`) || !strings.Contains(frame.Data, `"volumes":[]`) {
+		t.Fatalf("empty ceiling not reported with explicit execute:false and empty volumes: %s", frame.Data)
 	}
 }
 
