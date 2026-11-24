@@ -21,6 +21,7 @@ type fakeSetupPlatform struct {
 	installedUnit string
 	installedDir  string
 	startedUnit   string
+	onStart       func() error
 	trayAvail     bool
 	trayReason    string
 	trayInstalled bool
@@ -42,6 +43,9 @@ func (f *fakeSetupPlatform) installService(unitPath, stateDir string) error {
 }
 func (f *fakeSetupPlatform) startService(unitPath string) error {
 	f.startedUnit = unitPath
+	if f.onStart != nil {
+		return f.onStart()
+	}
 	return nil
 }
 func (f *fakeSetupPlatform) detectTrayHost(context.Context) (bool, string) {
@@ -381,5 +385,57 @@ func TestSetupNoStartLeavesPaused(t *testing.T) {
 	state, err := client.Load(dir)
 	if err != nil || !state.Paused {
 		t.Fatalf("expected paused state with --no-start, got state=%+v err=%v", state, err)
+	}
+}
+
+func TestSetupFailedStartReloadsStateUnderLock(t *testing.T) {
+	p := newPairHarness(t, "approved")
+	home := t.TempDir()
+	dir := filepath.Join(home, "state")
+	plat := &fakeSetupPlatform{
+		onStart: func() error {
+			// Simulate a daemon that briefly started, rotated its credential
+			// and persisted a pending session ID, then exited before start succeeded.
+			st, err := client.Load(dir)
+			if err != nil {
+				return err
+			}
+			st.Credential = "shcd_rotated-during-start"
+			st.PendingSession = "sess_pending_during_start"
+			if err := client.Save(dir, st); err != nil {
+				return err
+			}
+			return errors.New("simulated start failure")
+		},
+	}
+	deps := setupDeps{
+		in:       strings.NewReader(""),
+		out:      &bytes.Buffer{},
+		home:     home,
+		hostname: func() (string, error) { return "box", nil },
+		mounts: func() ([]volumes.Mount, error) {
+			return []volumes.Mount{{Key: "k-root", Mountpoint: "/", Filesystem: "ext4"}}, nil
+		},
+		client:   p.deps.client,
+		now:      p.deps.now,
+		sleep:    p.deps.sleep,
+		platform: plat,
+	}
+	args := []string{"--state-dir", dir, "--url", p.url, "--volume", "/", "--tray", "no", "--linger", "no", "--yes"}
+	if err := setupCommand(context.Background(), home, args, deps); err == nil {
+		t.Fatal("expected failure when startService fails")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "paused")); err != nil {
+		t.Fatalf("paused marker missing after failed start: %v", err)
+	}
+	st, err := client.Load(dir)
+	if err != nil {
+		t.Fatalf("client.Load: %v", err)
+	}
+	if !st.Paused {
+		t.Fatal("state.Paused was not restored to true")
+	}
+	if st.Credential != "shcd_rotated-during-start" || st.PendingSession != "sess_pending_during_start" {
+		t.Fatalf("rollback overwrote state written during start attempt: cred=%q pending=%q", st.Credential, st.PendingSession)
 	}
 }

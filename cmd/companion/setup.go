@@ -246,8 +246,12 @@ func setupCommand(ctx context.Context, home string, args []string, d setupDeps) 
 			}
 			var saveErr error
 			if reLock, lockErr := client.Lock(absDir); lockErr == nil {
-				state.Paused = true
-				saveErr = client.Save(absDir, state)
+				if latest, loadErr := client.Load(absDir); loadErr == nil {
+					latest.Paused = true
+					saveErr = client.Save(absDir, latest)
+				} else {
+					saveErr = loadErr
+				}
 				reLock.Close()
 			} else {
 				saveErr = lockErr
