@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,18 +19,20 @@ import (
 )
 
 type commandsDeps struct {
-	out       io.Writer
-	stopUnit  func(context.Context) error
-	startUnit func(string) error
-	now       func() time.Time
+	out         io.Writer
+	unitRunning func(context.Context) (bool, error)
+	stopUnit    func(context.Context) error
+	startUnit   func(string) error
+	now         func() time.Time
 }
 
 func defaultCommandsDeps() commandsDeps {
 	return commandsDeps{
-		out:       os.Stdout,
-		stopUnit:  stopUserUnit,
-		startUnit: startUserUnit,
-		now:       time.Now,
+		out:         os.Stdout,
+		unitRunning: unitRunning,
+		stopUnit:    stopUserUnit,
+		startUnit:   startUserUnit,
+		now:         time.Now,
 	}
 }
 
@@ -68,11 +71,15 @@ func commandsCommand(ctx context.Context, home string, args []string, d commands
 	flags := flag.NewFlagSet("commands", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	dir := flags.String("state-dir", filepath.Join(home, ".local/share/souls-house-companion"), "private state directory")
+	all := flags.Bool("all", false, "allow commands for all paired residents when policy is mixed")
 	if err := flags.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return writeHelp(d.out, "commands")
 		}
 		return newUserError(fmt.Sprintf("companion commands: %v (run 'souls-house-companion help commands')", err), err)
+	}
+	if *all && action != "on" {
+		return newUserError("companion commands: --all is only valid with 'commands on'", nil)
 	}
 	if flags.NArg() > 0 {
 		return newUserError(
@@ -99,10 +106,14 @@ func commandsCommand(ctx context.Context, home string, args []string, d commands
 		if runtime.GOOS == "darwin" && initial.ExecuteLifecycle != runner.Lifecycle {
 			allowed = 0
 		}
-		if allowed > 0 {
-			fmt.Fprintf(d.out, "Run commands: on (%d of %d paired resident(s) allowed locally)\n", allowed, len(initial.Ceiling.Residents))
-		} else {
-			fmt.Fprintf(d.out, "Run commands: off (0 of %d paired resident(s) allowed locally)\n", len(initial.Ceiling.Residents))
+		total := len(initial.Ceiling.Residents)
+		switch {
+		case allowed == 0:
+			fmt.Fprintf(d.out, "Run commands: off (0 of %d paired resident(s) allowed locally)\n", total)
+		case allowed < total:
+			fmt.Fprintf(d.out, "Run commands: on for %d of %d paired residents locally\n", allowed, total)
+		default:
+			fmt.Fprintf(d.out, "Run commands: on (%d of %d paired resident(s) allowed locally)\n", allowed, total)
 		}
 		return nil
 	}
@@ -111,28 +122,36 @@ func commandsCommand(ctx context.Context, home string, args []string, d commands
 	if allow && len(initial.Ceiling.Residents) == 0 {
 		return newUserError("companion commands: no paired residents in local ceiling; pair this computer first", nil)
 	}
+	if allow && !*all {
+		if err := mixedExecuteRefusal(initial.Ceiling); err != nil {
+			return err
+		}
+	}
 
 	_, markerErr := os.Lstat(filepath.Join(absDir, "paused"))
 	wasPaused := initial.Paused || !os.IsNotExist(markerErr)
 	unit := userUnitPath(home)
 
-	// Pause and stop the running service cleanly before mutating local state.
-	// Never start a device that was already paused.
+	// Check actual unit activity before stopping so an inactive-but-unpaused
+	// unit is never started by a toggle. Do NOT write the explicit "paused"
+	// marker for this temporary stop, so a concurrent explicit Pause stays
+	// distinguishable and wins.
+	wasRunning := false
 	if !wasPaused {
-		marker, err := os.OpenFile(filepath.Join(absDir, "paused"), os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
+		checkCtx, checkCancel := context.WithTimeout(ctx, systemctlTimeout)
+		running, err := d.unitRunning(checkCtx)
+		checkCancel()
 		if err != nil {
 			return err
 		}
-		syncErr := marker.Sync()
-		marker.Close()
-		if syncErr != nil {
-			return syncErr
-		}
-		stopCtx, cancel := context.WithTimeout(ctx, systemctlTimeout)
-		stopErr := d.stopUnit(stopCtx)
-		cancel()
-		if stopErr != nil {
-			return stopErr
+		wasRunning = running
+		if wasRunning {
+			stopCtx, cancel := context.WithTimeout(ctx, systemctlTimeout)
+			stopErr := d.stopUnit(stopCtx)
+			cancel()
+			if stopErr != nil {
+				return stopErr
+			}
 		}
 	}
 
@@ -141,7 +160,8 @@ func commandsCommand(ctx context.Context, home string, args []string, d commands
 		return err
 	}
 	// Reload state under the lock so any rotated credential or pending session
-	// written before the stop is preserved.
+	// written before the stop is preserved, and any concurrent explicit Pause
+	// wins over this toggle.
 	state, err := client.Load(absDir)
 	if err != nil {
 		lock.Close()
@@ -155,6 +175,14 @@ func commandsCommand(ctx context.Context, home string, args []string, d commands
 		lock.Close()
 		return newUserError("companion commands: no paired residents in local ceiling; pair this computer first", nil)
 	}
+	if allow && !*all {
+		if err := mixedExecuteRefusal(state.Ceiling); err != nil {
+			lock.Close()
+			return err
+		}
+	}
+	_, lockMarkerErr := os.Lstat(filepath.Join(absDir, "paused"))
+	pausedNow := state.Paused || !os.IsNotExist(lockMarkerErr)
 
 	if err := recordPolicyAudit(absDir, d.now()); err != nil {
 		lock.Close()
@@ -168,19 +196,21 @@ func commandsCommand(ctx context.Context, home string, args []string, d commands
 			state.ExecuteLifecycle = ""
 		}
 	}
-	if !wasPaused {
-		state.Paused = false
-	}
 	if err := client.Save(absDir, state); err != nil {
 		lock.Close()
 		return err
 	}
 	lock.Close()
 
-	if !wasPaused {
-		if err := os.Remove(filepath.Join(absDir, "paused")); err != nil && !os.IsNotExist(err) {
-			return err
+	// Re-check for an explicit Pause marker right before starting so a Pause
+	// that landed after lock release still wins.
+	if wasRunning && !pausedNow {
+		if _, err := os.Lstat(filepath.Join(absDir, "paused")); !os.IsNotExist(err) {
+			pausedNow = true
 		}
+	}
+
+	if wasRunning && !pausedNow {
 		if err := d.startUnit(unit); err != nil {
 			marker, mErr := os.OpenFile(filepath.Join(absDir, "paused"), os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
 			if mErr == nil {
@@ -219,4 +249,24 @@ func countExecuteResidents(p policy.Policy) int {
 		}
 	}
 	return n
+}
+
+func mixedExecuteRefusal(p policy.Policy) error {
+	allowed := countExecuteResidents(p)
+	if allowed == 0 || allowed == len(p.Residents) {
+		return nil
+	}
+	var added []string
+	for _, r := range p.Residents {
+		if !r.Execute {
+			added = append(added, sanitizeToken(r.ID))
+		}
+	}
+	return newUserError(
+		fmt.Sprintf(
+			"companion commands: mixed per-resident policy (%d of %d allowed); pass --all to also allow: %s",
+			allowed, len(p.Residents), strings.Join(added, ", "),
+		),
+		nil,
+	)
 }

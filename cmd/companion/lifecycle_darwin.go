@@ -134,6 +134,13 @@ func launchAgentAbsent(ctx context.Context) (bool, error) {
 	}
 	return false, errors.New("LaunchAgent state unavailable")
 }
+func unitRunning(ctx context.Context) (bool, error) {
+	absent, err := launchAgentAbsent(ctx)
+	if err != nil {
+		return false, err
+	}
+	return !absent, nil
+}
 func stopUserUnit(ctx context.Context) error {
 	absent, err := launchAgentAbsent(ctx)
 	if err != nil || absent {

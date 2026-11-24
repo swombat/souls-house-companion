@@ -53,6 +53,16 @@ func (s snapshot) canToggleCommands() bool {
 	return s.commandsAllowed || s.hasResidents
 }
 
+// commandsToggleTitle returns the tray menu label for Run commands. When any
+// resident is allowed (including a mixed per-resident ceiling), the tray offers
+// only turning commands off, never widening to everyone.
+func (s snapshot) commandsToggleTitle() string {
+	if s.canToggleCommands() && s.commandsAllowed {
+		return "Stop allowing commands"
+	}
+	return "Let residents run commands…"
+}
+
 func (s snapshot) label() string {
 	switch {
 	case s.mark() == markRunning:

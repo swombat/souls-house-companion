@@ -247,13 +247,13 @@ func (t *tray) render() {
 	case inProgress != "":
 		t.commandsToggle.Disable()
 	case !snap.canToggleCommands():
-		t.commandsToggle.SetTitle("Let residents run commands…")
+		t.commandsToggle.SetTitle(snap.commandsToggleTitle())
 		t.commandsToggle.Disable()
 	case snap.commandsAllowed:
-		t.commandsToggle.SetTitle("Stop allowing commands")
+		t.commandsToggle.SetTitle(snap.commandsToggleTitle())
 		t.commandsToggle.Enable()
 	default:
-		t.commandsToggle.SetTitle("Let residents run commands…")
+		t.commandsToggle.SetTitle(snap.commandsToggleTitle())
 		t.commandsToggle.Enable()
 	}
 	if confirming && inProgress == "" && snap.canToggleCommands() && !snap.commandsAllowed {

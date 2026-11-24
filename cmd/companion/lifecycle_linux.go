@@ -153,6 +153,13 @@ func inspectUnit(ctx context.Context, unitName string) (userUnitState, error) {
 func inspectUserUnit(ctx context.Context) (userUnitState, error) {
 	return inspectUnit(ctx, companionUnit)
 }
+func unitRunning(ctx context.Context) (bool, error) {
+	state, err := inspectUserUnit(ctx)
+	if err != nil {
+		return false, err
+	}
+	return !state.quiescent(), nil
+}
 func (s userUnitState) absent() bool    { return s.load == "not-found" && s.quiescent() }
 func (s userUnitState) quiescent() bool { return s.active == "inactive" || s.active == "failed" }
 func stopUnit(ctx context.Context, unitName string) error {

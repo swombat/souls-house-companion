@@ -62,16 +62,19 @@ To check the current local setting:
 souls-house-companion commands status
 ```
 
-`commands on` and `commands off` pause the service if it is running, record a
+`commands on` and `commands off` stop the service if it is currently running, record a
 `policy.apply` entry in `audit.jsonl`, update the local execute ceiling for
 already-paired residents without touching volume grants, and restart the
-service only if it was running before (a paused companion stays paused).
-Per-resident `policy show` and `policy apply` remain supported and untouched.
+service only if it was running before (a paused or stopped companion is never
+started). Per-resident `policy show` and `policy apply` remain supported and
+untouched; if some residents already have execute permission and others do not,
+`commands on` refuses unless you pass `--all` and lists who would be added.
 
 If you use `souls-house-tray`, you can also turn commands on from the tray
 menu via a two-step inline confirmation (**Let residents run commands…** →
 **Confirm: allow full user shell access**), or turn them off in one click
-(**Stop allowing commands**).
+(**Stop allowing commands**). In a mixed per-resident state, the tray offers
+only **Stop allowing commands**.
 
 ## Day-to-day commands
 
