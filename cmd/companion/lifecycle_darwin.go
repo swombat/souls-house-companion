@@ -135,11 +135,49 @@ func launchAgentAbsent(ctx context.Context) (bool, error) {
 	return false, errors.New("LaunchAgent state unavailable")
 }
 func unitRunning(ctx context.Context) (bool, error) {
-	absent, err := launchAgentAbsent(ctx)
+	if _, err := launchctl(ctx, "print", guiDomain()); err != nil {
+		return false, err
+	}
+	out, err := launchctl(ctx, "print", serviceTarget())
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 113 &&
+			strings.Contains(string(out), "Could not find service") {
+			return false, nil
+		}
+		return false, errors.New("LaunchAgent state unavailable")
+	}
+	state, err := launchAgentState(out)
 	if err != nil {
 		return false, err
 	}
-	return !absent, nil
+	return state == "running", nil
+}
+
+// launchAgentState extracts the top-level "state = <value>" line from
+// `launchctl print <service-target>` output. Only "running" indicates an
+// active process; loaded-but-idle jobs report "not running", "waiting", etc.
+func launchAgentState(out []byte) (string, error) {
+	depth := 0
+	for _, rawLine := range strings.Split(string(out), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if depth == 1 {
+			if key, val, ok := strings.Cut(line, "="); ok {
+				if strings.TrimSpace(key) == "state" {
+					state := strings.TrimSpace(val)
+					if state == "" {
+						return "", errors.New("invalid LaunchAgent state")
+					}
+					return state, nil
+				}
+			}
+		}
+		depth += strings.Count(line, "{") - strings.Count(line, "}")
+		if depth < 0 {
+			depth = 0
+		}
+	}
+	return "", errors.New("LaunchAgent state unavailable")
 }
 func stopUserUnit(ctx context.Context) error {
 	absent, err := launchAgentAbsent(ctx)

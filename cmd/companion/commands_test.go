@@ -6,12 +6,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/swombat/souls-house-companion/internal/client"
 	"github.com/swombat/souls-house-companion/internal/policy"
+	"github.com/swombat/souls-house-companion/internal/runner"
 )
 
 func TestCommandsOnOffPreservesRunningAndPausedState(t *testing.T) {
@@ -137,8 +139,12 @@ func TestCommandsFailedRestartReloadsStateAndRestoresPaused(t *testing.T) {
 		},
 		now: time.Now,
 	}
-	if err := commandsCommand(context.Background(), home, []string{"on", "--state-dir", dir}, deps); err == nil {
+	err := commandsCommand(context.Background(), home, []string{"on", "--state-dir", dir}, deps)
+	if err == nil {
 		t.Fatal("expected error when restart fails")
+	}
+	if msg := formatDiagnostic(err); !strings.Contains(msg, "paused") || !strings.Contains(msg, "resume") {
+		t.Fatalf("failed restart diagnostic should explain paused state and resume command, got %q", msg)
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "paused")); err != nil {
 		t.Fatalf("paused marker missing after failed restart: %v", err)
@@ -186,13 +192,29 @@ func mixedDellCeiling() policy.Policy {
 func TestCommandsMixedCeilingRefusesWithoutAllAndAllowsWithAll(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, "state")
-	if err := client.Save(dir, client.State{
+	initial := client.State{
 		URL:        "https://souls.house",
 		DeviceID:   "dell1",
 		Credential: "shcd_dell",
 		Ceiling:    mixedDellCeiling(),
 		Paused:     false,
-	}); err != nil {
+	}
+	if runtime.GOOS == "darwin" {
+		// On Darwin, commands status requires the current ExecuteLifecycle to
+		// report local commands as on; without it, status reports off.
+		if err := client.Save(dir, initial); err != nil {
+			t.Fatal(err)
+		}
+		var darwinOff bytes.Buffer
+		if err := commandsCommand(context.Background(), home, []string{"status", "--state-dir", dir}, commandsDeps{out: &darwinOff, now: time.Now}); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(darwinOff.String(), "Run commands: off (0 of 3") {
+			t.Fatalf("expected Darwin status without lifecycle to report off, got %q", darwinOff.String())
+		}
+		initial.ExecuteLifecycle = runner.Lifecycle
+	}
+	if err := client.Save(dir, initial); err != nil {
 		t.Fatal(err)
 	}
 
@@ -392,4 +414,134 @@ func TestCommandsFailedStopDoesNotSplitPausedState(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(dir, "paused")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed temporary stop should not leave a split paused marker, err=%v", err)
 	}
+}
+
+func TestCommandsEarlyExitAfterStopRestartsUnit(t *testing.T) {
+	t.Run("audit_write_fails", func(t *testing.T) {
+		home := t.TempDir()
+		dir := filepath.Join(home, "state")
+		if err := client.Save(dir, client.State{
+			URL:        "https://souls.house",
+			DeviceID:   "dev1",
+			Credential: "shcd_fixture",
+			Ceiling:    pairedCeiling(),
+			Paused:     false,
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		started := 0
+		deps := commandsDeps{
+			out:         &bytes.Buffer{},
+			unitRunning: func(context.Context) (bool, error) { return true, nil },
+			stopUnit: func(context.Context) error {
+				// Make audit.jsonl a directory so recordPolicyAudit fails after stop.
+				return os.Mkdir(filepath.Join(dir, "audit.jsonl"), 0700)
+			},
+			startUnit: func(string) error {
+				started++
+				return nil
+			},
+			now: time.Now,
+		}
+		if err := commandsCommand(context.Background(), home, []string{"on", "--state-dir", dir}, deps); err == nil {
+			t.Fatal("expected error when audit write fails")
+		}
+		if started != 1 {
+			t.Fatalf("expected stopped unit to be restarted on early error, got start=%d", started)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "paused")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected no paused marker after successful recovery restart, err=%v", err)
+		}
+		st, err := client.Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Paused {
+			t.Fatal("expected state.Paused to remain false after recovery restart")
+		}
+	})
+
+	t.Run("mixed_refusal_under_lock", func(t *testing.T) {
+		home := t.TempDir()
+		dir := filepath.Join(home, "state")
+		if err := client.Save(dir, client.State{
+			URL:        "https://souls.house",
+			DeviceID:   "dell1",
+			Credential: "shcd_dell",
+			Ceiling:    pairedCeiling(),
+			Paused:     false,
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		started := 0
+		deps := commandsDeps{
+			out:         &bytes.Buffer{},
+			unitRunning: func(context.Context) (bool, error) { return true, nil },
+			stopUnit: func(context.Context) error {
+				// Simulate a concurrent policy change making the ceiling mixed before lock.
+				s, err := client.Load(dir)
+				if err != nil {
+					return err
+				}
+				s.Ceiling = mixedDellCeiling()
+				return client.Save(dir, s)
+			},
+			startUnit: func(string) error {
+				started++
+				return nil
+			},
+			now: time.Now,
+		}
+		if err := commandsCommand(context.Background(), home, []string{"on", "--state-dir", dir}, deps); err == nil {
+			t.Fatal("expected mixed refusal under lock")
+		}
+		if started != 1 {
+			t.Fatalf("expected unit restarted after mixed refusal under lock, got start=%d", started)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "paused")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected no paused marker, err=%v", err)
+		}
+	})
+
+	t.Run("early_exit_respects_concurrent_pause", func(t *testing.T) {
+		home := t.TempDir()
+		dir := filepath.Join(home, "state")
+		if err := client.Save(dir, client.State{
+			URL:        "https://souls.house",
+			DeviceID:   "dev1",
+			Credential: "shcd_fixture",
+			Ceiling:    pairedCeiling(),
+			Paused:     false,
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		started := 0
+		deps := commandsDeps{
+			out:         &bytes.Buffer{},
+			unitRunning: func(context.Context) (bool, error) { return true, nil },
+			stopUnit: func(context.Context) error {
+				if err := os.WriteFile(filepath.Join(dir, "paused"), nil, 0600); err != nil {
+					return err
+				}
+				return os.Mkdir(filepath.Join(dir, "audit.jsonl"), 0700)
+			},
+			startUnit: func(string) error {
+				started++
+				return nil
+			},
+			now: time.Now,
+		}
+		if err := commandsCommand(context.Background(), home, []string{"on", "--state-dir", dir}, deps); err == nil {
+			t.Fatal("expected error when audit write fails")
+		}
+		if started != 0 {
+			t.Fatalf("explicit pause must prevent recovery restart on early error, got start=%d", started)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "paused")); err != nil {
+			t.Fatalf("expected paused marker to remain intact, err=%v", err)
+		}
+	})
 }

@@ -198,3 +198,69 @@ func TestDarwinRunCommandsSwitchWritesLocalExecute(t *testing.T) {
 		}
 	}
 }
+
+func TestDarwinLaunchAgentStateParsing(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "running",
+			input: "gui/501/house.souls.companion = {\n" +
+				"\tactive count = 1\n" +
+				"\tstate = running\n" +
+				"\tpid = 4242\n" +
+				"}\n",
+			want: "running",
+		},
+		{
+			name: "loaded_not_running",
+			input: "gui/501/house.souls.companion = {\n" +
+				"\tactive count = 0\n" +
+				"\tstate = not running\n" +
+				"}\n",
+			want: "not running",
+		},
+		{
+			name: "waiting",
+			input: "gui/501/house.souls.companion = {\n" +
+				"\tstate = waiting\n" +
+				"}\n",
+			want: "waiting",
+		},
+		{
+			name: "nested_state_ignored",
+			input: "gui/501/house.souls.companion = {\n" +
+				"\tproperties = {\n" +
+				"\t\tstate = running\n" +
+				"\t}\n" +
+				"\tstate = spawn scheduled\n" +
+				"}\n",
+			want: "spawn scheduled",
+		},
+		{
+			name:    "missing_state",
+			input:   "gui/501/house.souls.companion = {\n\tactive count = 0\n}\n",
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := launchAgentState([]byte(tc.input))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got state %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("launchAgentState = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

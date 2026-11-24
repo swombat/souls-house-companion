@@ -53,7 +53,7 @@ func recordPolicyAudit(dir string, now time.Time) error {
 	return nil
 }
 
-func commandsCommand(ctx context.Context, home string, args []string, d commandsDeps) error {
+func commandsCommand(ctx context.Context, home string, args []string, d commandsDeps) (retErr error) {
 	if len(args) > 0 && isHelpFlag(args[0]) {
 		return writeHelp(d.out, "commands")
 	}
@@ -155,62 +155,36 @@ func commandsCommand(ctx context.Context, home string, args []string, d commands
 		}
 	}
 
-	lock, err := client.Lock(absDir)
-	if err != nil {
-		return err
-	}
-	// Reload state under the lock so any rotated credential or pending session
-	// written before the stop is preserved, and any concurrent explicit Pause
-	// wins over this toggle.
-	state, err := client.Load(absDir)
-	if err != nil {
-		lock.Close()
-		return err
-	}
-	if state.Uninstalled {
-		lock.Close()
-		return newUserError("companion commands: this computer is not paired (run 'souls-house-companion setup' first)", nil)
-	}
-	if allow && len(state.Ceiling.Residents) == 0 {
-		lock.Close()
-		return newUserError("companion commands: no paired residents in local ceiling; pair this computer first", nil)
-	}
-	if allow && !*all {
-		if err := mixedExecuteRefusal(state.Ceiling); err != nil {
-			lock.Close()
-			return err
-		}
-	}
-	_, lockMarkerErr := os.Lstat(filepath.Join(absDir, "paused"))
-	pausedNow := state.Paused || !os.IsNotExist(lockMarkerErr)
+	restarted := false
+	pausedNow := false
+	uninstalledNow := false
+	loadedUnderLock := false
 
-	if err := recordPolicyAudit(absDir, d.now()); err != nil {
-		lock.Close()
-		return err
-	}
-	state.Ceiling = withLocalExecute(state.Ceiling, allow)
-	if runtime.GOOS == "darwin" {
-		if allow {
-			state.ExecuteLifecycle = runner.Lifecycle
-		} else {
-			state.ExecuteLifecycle = ""
+	restartIfNeeded := func() error {
+		if !wasRunning || restarted || uninstalledNow {
+			return nil
 		}
-	}
-	if err := client.Save(absDir, state); err != nil {
-		lock.Close()
-		return err
-	}
-	lock.Close()
-
-	// Re-check for an explicit Pause marker right before starting so a Pause
-	// that landed after lock release still wins.
-	if wasRunning && !pausedNow {
-		if _, err := os.Lstat(filepath.Join(absDir, "paused")); !os.IsNotExist(err) {
-			pausedNow = true
+		restarted = true
+		if !loadedUnderLock {
+			if s, err := client.Load(absDir); err == nil {
+				if s.Uninstalled {
+					return nil
+				}
+				if s.Paused {
+					pausedNow = true
+				}
+			}
 		}
-	}
-
-	if wasRunning && !pausedNow {
+		// Re-check for an explicit Pause marker right before starting so a Pause
+		// that landed after lock release (or before lock acquisition) still wins.
+		if !pausedNow {
+			if _, err := os.Lstat(filepath.Join(absDir, "paused")); !os.IsNotExist(err) {
+				pausedNow = true
+			}
+		}
+		if pausedNow {
+			return nil
+		}
 		if err := d.startUnit(unit); err != nil {
 			marker, mErr := os.OpenFile(filepath.Join(absDir, "paused"), os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
 			if mErr == nil {
@@ -229,8 +203,73 @@ func commandsCommand(ctx context.Context, home string, args []string, d commands
 			} else {
 				saveErr = lockErr
 			}
-			return errors.Join(err, mErr, saveErr)
+			return newUserError(
+				"companion commands: failed to restart the service; this computer is now paused; run 'souls-house-companion resume'",
+				errors.Join(err, mErr, saveErr),
+			)
 		}
+		return nil
+	}
+
+	// Once a running unit has been stopped, every exit path must restart it
+	// unless an explicit Pause or uninstall arrived in the meantime.
+	defer func() {
+		if rErr := restartIfNeeded(); rErr != nil {
+			retErr = errors.Join(retErr, rErr)
+		}
+	}()
+
+	updateState := func() (client.State, error) {
+		lock, err := client.Lock(absDir)
+		if err != nil {
+			return client.State{}, err
+		}
+		defer lock.Close()
+		// Reload state under the lock so any rotated credential or pending session
+		// written before the stop is preserved, and any concurrent explicit Pause
+		// wins over this toggle.
+		state, err := client.Load(absDir)
+		if err != nil {
+			return client.State{}, err
+		}
+		loadedUnderLock = true
+		if state.Uninstalled {
+			uninstalledNow = true
+			return client.State{}, newUserError("companion commands: this computer is not paired (run 'souls-house-companion setup' first)", nil)
+		}
+		_, lockMarkerErr := os.Lstat(filepath.Join(absDir, "paused"))
+		pausedNow = state.Paused || !os.IsNotExist(lockMarkerErr)
+		if allow && len(state.Ceiling.Residents) == 0 {
+			return client.State{}, newUserError("companion commands: no paired residents in local ceiling; pair this computer first", nil)
+		}
+		if allow && !*all {
+			if err := mixedExecuteRefusal(state.Ceiling); err != nil {
+				return client.State{}, err
+			}
+		}
+		if err := recordPolicyAudit(absDir, d.now()); err != nil {
+			return client.State{}, err
+		}
+		state.Ceiling = withLocalExecute(state.Ceiling, allow)
+		if runtime.GOOS == "darwin" {
+			if allow {
+				state.ExecuteLifecycle = runner.Lifecycle
+			} else {
+				state.ExecuteLifecycle = ""
+			}
+		}
+		if err := client.Save(absDir, state); err != nil {
+			return client.State{}, err
+		}
+		return state, nil
+	}
+
+	state, err := updateState()
+	if err != nil {
+		return err
+	}
+	if err := restartIfNeeded(); err != nil {
+		return err
 	}
 
 	if allow {

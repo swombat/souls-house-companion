@@ -158,8 +158,9 @@ func unitRunning(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return !state.quiescent(), nil
+	return state.running(), nil
 }
+func (s userUnitState) running() bool   { return s.load == "loaded" && s.active == "active" }
 func (s userUnitState) absent() bool    { return s.load == "not-found" && s.quiescent() }
 func (s userUnitState) quiescent() bool { return s.active == "inactive" || s.active == "failed" }
 func stopUnit(ctx context.Context, unitName string) error {
