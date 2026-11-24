@@ -39,20 +39,45 @@ func main() {
 			}
 			os.Exit(exit.code)
 		}
-		fmt.Fprintln(os.Stderr, platformDiagnostic(err))
+		fmt.Fprintln(os.Stderr, formatDiagnostic(err))
 		os.Exit(1)
 	}
 }
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("command required")
+		return newUserError("companion: command required — run 'souls-house-companion --help' for usage", nil)
+	}
+	if isHelpFlag(args[0]) {
+		return writeHelp(os.Stdout, "")
+	}
+	if args[0] == "help" {
+		topic := ""
+		if len(args) > 1 {
+			topic = args[1]
+		}
+		return writeHelp(os.Stdout, topic)
+	}
+	if args[0] == "setup" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		return setupCommand(ctx, home, args[1:], defaultSetupDeps(home))
 	}
 	if args[0] == "version" {
+		if len(args) > 1 && isHelpFlag(args[1]) {
+			return writeHelp(os.Stdout, "version")
+		}
 		fmt.Println(version)
 		return nil
 	}
 	if args[0] == "desktop" {
+		if len(args) > 1 && isHelpFlag(args[1]) {
+			return writeHelp(os.Stdout, "desktop")
+		}
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return err
@@ -65,8 +90,11 @@ func run(args []string) error {
 	}
 	policyAction := ""
 	if args[0] == "policy" {
+		if len(args) > 1 && isHelpFlag(args[1]) {
+			return writeHelp(os.Stdout, "policy")
+		}
 		if len(args) < 2 || (args[1] != "show" && args[1] != "apply") {
-			return errors.New("policy show or apply required")
+			return newUserError("companion policy: subcommand 'show' or 'apply' required (run 'souls-house-companion help policy')", nil)
 		}
 		policyAction = args[1]
 		args = append([]string{"policy"}, args[2:]...)
@@ -76,6 +104,7 @@ func run(args []string) error {
 		return err
 	}
 	flags := flag.NewFlagSet("companion", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
 	dir := flags.String("state-dir", filepath.Join(home, ".local/share/souls-house-companion"), "private state directory")
 	base := flags.String("url", "", "HTTPS house origin")
 	requestID := flags.String("request-id", "", "device request ID bound to enrollment")
@@ -88,13 +117,17 @@ func run(args []string) error {
 	requestAccessibility := flags.Bool("request", false, "accessibility: ask the running service to request macOS Accessibility")
 	_ = flags.Bool("json", false, "machine-readable status")
 	pairName := flags.String("name", "", "pair: name shown to the house owner")
+	pairHuman := flags.Bool("human", false, "pair: print human-readable instructions instead of JSON lines")
 	var pairVolumes stringList
 	flags.Var(&pairVolumes, "volume", "pair: volume KEY or KEY=write to offer (repeatable)")
 	if err := flags.Parse(args[1:]); err != nil {
-		return err
+		if errors.Is(err, flag.ErrHelp) {
+			return writeHelp(os.Stdout, args[0])
+		}
+		return newUserError(fmt.Sprintf("companion %s: %v (run 'souls-house-companion help %s')", sanitizeToken(args[0]), err, sanitizeToken(args[0])), err)
 	}
 	if args[0] == "uninstall" && !*user {
-		return errors.New("only user uninstall supported")
+		return newUserError("companion uninstall: pass --user (only user uninstall is supported)", nil)
 	}
 	absolute, err := filepath.Abs(*dir)
 	if err != nil {
@@ -199,6 +232,9 @@ func run(args []string) error {
 		} else if !os.IsNotExist(err) {
 			return err
 		}
+		if err := uninstallTrayUnit(ctx, home); err != nil {
+			return err
+		}
 		if err := reloadUserManager(); err != nil {
 			return err
 		}
@@ -214,10 +250,10 @@ func run(args []string) error {
 		return json.NewEncoder(os.Stdout).Encode(mounts)
 	case "enroll":
 		if !*tokenStdin || *base == "" || *requestID == "" || *policyFile == "" {
-			return errors.New("url, request-id, policy and token-stdin required")
+			return newUserError("companion enroll: --url, --request-id, --policy and --token-stdin are required", nil)
 		}
 		if _, err := os.Lstat(filepath.Join(*dir, "state.json")); !os.IsNotExist(err) {
-			return errors.New("already enrolled or state unavailable")
+			return newUserError("companion enroll: already enrolled or state unavailable", nil)
 		}
 		ceiling, err := loadPolicy(*policyFile)
 		if err != nil {
@@ -238,10 +274,12 @@ func run(args []string) error {
 		// Signals cancel only the wait; see client.Pair for the enrollment step.
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 		defer stop()
-		return pairCommand(ctx, *dir, *base, *pairName, pairVolumes, newPairDeps())
+		deps := newPairDeps()
+		deps.human = *pairHuman
+		return pairCommand(ctx, *dir, *base, *pairName, pairVolumes, deps)
 	case "install":
 		if !*user {
-			return errors.New("only user installation supported")
+			return newUserError("companion install: pass --user (only user installation is supported)", nil)
 		}
 		return installUnit(unit, *dir)
 	case "status":
@@ -271,7 +309,7 @@ func run(args []string) error {
 			return json.NewEncoder(os.Stdout).Encode(state.Ceiling)
 		}
 		if *policyFile == "" {
-			return errors.New("policy apply requires policy file")
+			return newUserError("companion policy apply: --policy FILE is required", nil)
 		}
 		state.Ceiling, err = loadPolicy(*policyFile)
 		if err != nil {
@@ -320,7 +358,7 @@ func run(args []string) error {
 	case "serve":
 		return serve(*dir, unit)
 	default:
-		return errors.New("unknown command")
+		return newUserError(fmt.Sprintf("companion: unknown command %q — run 'souls-house-companion --help' for usage", sanitizeToken(args[0])), nil)
 	}
 }
 

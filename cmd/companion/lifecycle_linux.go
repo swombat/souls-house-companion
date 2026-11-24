@@ -14,17 +14,53 @@ import (
 	"time"
 )
 
-const companionUnit = "souls-house-companion.service"
+const (
+	companionUnit = "souls-house-companion.service"
+	trayUnit      = "souls-house-tray.service"
+)
+
+type systemctlError struct {
+	operation   string
+	unit        string
+	code        int
+	unreachable bool
+	notFound    bool
+	cause       error
+}
+
+func (e *systemctlError) Error() string { return "systemctl command failed" }
+func (e *systemctlError) Unwrap() error { return e.cause }
 
 func idleBeforeServe(_ client.State, err error) (bool, error) { return false, err }
 
 func addPlatformStatus(_ map[string]any) {}
-func platformDiagnostic(_ error) string {
-	return "companion: command failed; check configuration, authority and service status"
+func platformDiagnostic(err error) string {
+	var failure *systemctlError
+	if errors.As(err, &failure) {
+		if failure.notFound {
+			return "companion: systemctl not found on PATH; systemd user services are required on Linux"
+		}
+		if failure.unreachable {
+			return "companion: systemd user manager is not reachable (check XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS, or log in with a systemd user session)"
+		}
+		if failure.unit != "" {
+			return fmt.Sprintf("companion: systemctl --user %s %s failed (exit %d); check 'systemctl --user status %s'", failure.operation, failure.unit, failure.code, failure.unit)
+		}
+		return fmt.Sprintf("companion: systemctl --user %s failed (exit %d)", failure.operation, failure.code)
+	}
+	return ""
 }
 
 func userUnitPath(home string) string {
 	return filepath.Join(home, ".config/systemd/user", companionUnit)
+}
+
+func trayUnitPath(home string) string {
+	config := os.Getenv("XDG_CONFIG_HOME")
+	if config == "" || !filepath.IsAbs(config) {
+		config = filepath.Join(home, ".config")
+	}
+	return filepath.Join(config, "systemd/user", trayUnit)
 }
 func reloadUserManager() error     { return systemctl("daemon-reload") }
 func startUserUnit(_ string) error { return systemctl("start", companionUnit) }
@@ -48,14 +84,43 @@ func systemctlOutput(ctx context.Context, args ...string) ([]byte, error) {
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	return output, err
+	if err != nil {
+		op, unitName := "", ""
+		if len(args) > 0 {
+			op = args[0]
+		}
+		for _, a := range args[1:] {
+			if strings.HasSuffix(a, ".service") {
+				unitName = a
+				break
+			}
+		}
+		se := &systemctlError{operation: op, unit: unitName, code: -1, cause: err}
+		if errors.Is(err, exec.ErrNotFound) {
+			se.notFound = true
+			return nil, se
+		}
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			se.code = exit.ExitCode()
+			stderr := strings.ToLower(string(exit.Stderr))
+			if strings.Contains(stderr, "failed to connect to bus") ||
+				strings.Contains(stderr, "no medium found") ||
+				strings.Contains(stderr, "not been booted with systemd") ||
+				strings.Contains(stderr, "system has not been booted") {
+				se.unreachable = true
+			}
+		}
+		return nil, se
+	}
+	return output, nil
 }
 
 type userUnitState struct{ load, active string }
 
 // Require a reachable manager's structured answer, not a missing file.
-func inspectUserUnit(ctx context.Context) (userUnitState, error) {
-	output, err := systemctlOutput(ctx, "show", "--property=LoadState", "--property=ActiveState", companionUnit)
+func inspectUnit(ctx context.Context, unitName string) (userUnitState, error) {
+	output, err := systemctlOutput(ctx, "show", "--property=LoadState", "--property=ActiveState", unitName)
 	if err != nil {
 		return userUnitState{}, err
 	}
@@ -85,20 +150,23 @@ func inspectUserUnit(ctx context.Context) (userUnitState, error) {
 	}
 	return state, nil
 }
+func inspectUserUnit(ctx context.Context) (userUnitState, error) {
+	return inspectUnit(ctx, companionUnit)
+}
 func (s userUnitState) absent() bool    { return s.load == "not-found" && s.quiescent() }
 func (s userUnitState) quiescent() bool { return s.active == "inactive" || s.active == "failed" }
-func stopUserUnit(ctx context.Context) error {
-	state, err := inspectUserUnit(ctx)
+func stopUnit(ctx context.Context, unitName string) error {
+	state, err := inspectUnit(ctx, unitName)
 	if err != nil {
 		return err
 	}
 	if state.absent() {
 		return nil
 	}
-	if _, err := systemctlOutput(ctx, "stop", companionUnit); err != nil {
+	if _, err := systemctlOutput(ctx, "stop", unitName); err != nil {
 		return err
 	}
-	state, err = inspectUserUnit(ctx)
+	state, err = inspectUnit(ctx, unitName)
 	if err != nil {
 		return err
 	}
@@ -107,9 +175,12 @@ func stopUserUnit(ctx context.Context) error {
 	}
 	return nil
 }
-func disableUserUnit(ctx context.Context, unitPath string) error {
+func stopUserUnit(ctx context.Context) error {
+	return stopUnit(ctx, companionUnit)
+}
+func disableUnit(ctx context.Context, unitName, unitPath string) error {
 	if _, err := os.Lstat(unitPath); os.IsNotExist(err) {
-		state, err := inspectUserUnit(ctx)
+		state, err := inspectUnit(ctx, unitName)
 		if err != nil {
 			return err
 		}
@@ -119,8 +190,37 @@ func disableUserUnit(ctx context.Context, unitPath string) error {
 	} else if err != nil {
 		return err
 	}
-	_, err := systemctlOutput(ctx, "disable", companionUnit)
+	_, err := systemctlOutput(ctx, "disable", unitName)
 	return err
+}
+func disableUserUnit(ctx context.Context, unitPath string) error {
+	return disableUnit(ctx, companionUnit, unitPath)
+}
+
+// uninstallTrayUnit stops, disables, and removes the Linux tray unit if it is
+// installed. A missing tray unit file is a no-op (matching cmd/tray/unit.go).
+func uninstallTrayUnit(ctx context.Context, home string) error {
+	path := trayUnitPath(home)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("tray unit must be a regular file")
+	}
+	if err := stopUnit(ctx, trayUnit); err != nil {
+		return err
+	}
+	if err := disableUnit(ctx, trayUnit, path); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 func installUnit(path, dir string) error {
 	exe, err := os.Executable()
