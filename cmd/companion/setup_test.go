@@ -166,7 +166,14 @@ func TestPairHumanOutputAndNoSecrets(t *testing.T) {
 	}
 	noSecrets(t, nil, p.out)
 	out := p.out.String()
-	for _, want := range []string{"Pairing code: ABCD-EFGH", p.url + "/companion", "Paired! Device ID: dev1", "souls-house-companion install --user", "souls-house-companion resume"} {
+	for _, want := range []string{
+		"Pairing code: ABCD-EFGH",
+		p.url + "/computers",
+		"Settings -> Computers -> Add a computer",
+		"Paired! Device ID: dev1",
+		"souls-house-companion install --user",
+		"souls-house-companion resume",
+	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("human output missing %q:\n%s", want, out)
 		}
@@ -234,12 +241,19 @@ func TestSetupNonInteractiveAgainstFakeHouse(t *testing.T) {
 		"/mnt/archive (xfs, 2.0 TB): read and write",
 		"Run commands: off",
 		"ABCD-EFGH",
+		p.url + "/computers",
+		"Settings -> Computers -> Add a computer",
 		"Companion service: installed and running",
 		"headless or SSH session",
 		"Background lingering: enabled",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("setup output missing %q:\n%s", want, text)
+		}
+	}
+	for _, unwanted := range []string{"To finish manually", "souls-house-companion install --user", "souls-house-companion resume"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("setup output should not contain standalone pair next steps %q:\n%s", unwanted, text)
 		}
 	}
 	if plat.installedDir != dir || plat.startedUnit == "" {
@@ -311,6 +325,28 @@ func TestSetupRefusesBeforeNetworkWhenManagerUnreachableOrDeclined(t *testing.T)
 	}
 	if p.house.hits != 0 {
 		t.Fatalf("expected 0 house requests when user declined, got %d", p.house.hits)
+	}
+}
+
+func TestSetupExcludesBootAndEfiInBothMenuAndVolumeFlag(t *testing.T) {
+	all := []volumes.Mount{
+		{Key: "k-boot", Mountpoint: "/boot", Filesystem: "ext4"},
+		{Key: "k-efi", Mountpoint: "/boot/efi", Filesystem: "vfat"},
+		{Key: "k-efi2", Mountpoint: "/efi", Filesystem: "vfat"},
+		{Key: "k-root", Mountpoint: "/", Filesystem: "ext4"},
+	}
+	offered := filterSetupMounts(all, "/home/daniel", nil)
+	if len(offered) != 1 || offered[0].Mount.Mountpoint != "/" {
+		t.Fatalf("menu should only offer /, got %+v", offered)
+	}
+	for _, bad := range []string{"/boot", "/boot/efi", "/efi", "k-boot", "k-efi", "k-efi2"} {
+		if _, _, err := resolveVolumeSpecs(all, offered, []string{bad}, false); err == nil {
+			t.Fatalf("expected --volume %q to be excluded from setup", bad)
+		}
+	}
+	specs, _, err := resolveVolumeSpecs(all, offered, []string{"/"}, false)
+	if err != nil || len(specs) != 1 || specs[0] != "k-root" {
+		t.Fatalf("expected / to resolve cleanly, got specs=%v err=%v", specs, err)
 	}
 }
 

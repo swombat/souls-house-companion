@@ -28,12 +28,13 @@ func (e *exitError) Error() string { return e.msg }
 // pairDeps are the edges tests replace: mount discovery, the house client,
 // output, and time.
 type pairDeps struct {
-	mounts func() ([]volumes.Mount, error)
-	client *client.Client
-	out    io.Writer
-	now    func() time.Time
-	sleep  func(context.Context, time.Duration) error
-	human  bool
+	mounts            func() ([]volumes.Mount, error)
+	client            *client.Client
+	out               io.Writer
+	now               func() time.Time
+	sleep             func(context.Context, time.Duration) error
+	human             bool
+	suppressNextSteps bool
 }
 
 func newPairDeps() pairDeps {
@@ -55,6 +56,25 @@ func pairFailure(err error) error {
 	return &exitError{code: 1, msg: "companion: pair failed: " + err.Error()}
 }
 
+// canPairOverState allows pairing when no state.json exists OR when state.json
+// is a verified uninstall receipt (Uninstalled with empty Credential and
+// PendingSession). Live, partial, symlinked, or corrupt state fails closed.
+func canPairOverState(dir string) error {
+	if _, err := os.Lstat(filepath.Join(dir, "state.json")); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return errors.New("already enrolled or state unavailable")
+	}
+	state, err := client.Load(dir)
+	if err != nil {
+		return errors.New("already enrolled or state unavailable")
+	}
+	if state.Uninstalled && state.Credential == "" && state.PendingSession == "" {
+		return nil
+	}
+	return errors.New("already enrolled or state unavailable")
+}
+
 // pairCommand: JSON lines on stdout (the Mac menu reads them), one stderr line
 // and exit 1 on failure, exit 3 for expired/cancelled, exit 4 with
 // {"event":"uncertain"} when the house may have enrolled this device but it
@@ -64,8 +84,8 @@ func pairCommand(ctx context.Context, dir, base, name string, specs []string, d 
 	if base == "" || name == "" || len(specs) == 0 {
 		return pairFailure(errors.New("url, name and at least one volume required"))
 	}
-	if _, err := os.Lstat(filepath.Join(dir, "state.json")); !os.IsNotExist(err) {
-		return pairFailure(errors.New("already enrolled or state unavailable"))
+	if err := canPairOverState(dir); err != nil {
+		return pairFailure(err)
 	}
 	mounts, err := d.mounts()
 	if err != nil {
@@ -80,10 +100,10 @@ func pairCommand(ctx context.Context, dir, base, name string, specs []string, d 
 		URL: base, Name: name, Offers: offers, Now: d.now, Sleep: d.sleep,
 		OnCode: func(code string, expires time.Time) {
 			if d.human {
-				companionURL := strings.TrimRight(base, "/") + "/companion"
+				computersURL := strings.TrimRight(base, "/") + "/computers"
 				fmt.Fprintf(d.out, "Pairing code: %s\n", code)
 				fmt.Fprintf(d.out, "Expires at:   %s\n", expires.UTC().Format("2006-01-02 15:04 UTC"))
-				fmt.Fprintf(d.out, "\nOpen %s in your browser, enter this code, and approve this computer.\n", companionURL)
+				fmt.Fprintf(d.out, "\nOpen %s in your browser (Settings -> Computers -> Add a computer), enter this code, and approve this computer.\n", computersURL)
 				fmt.Fprintln(d.out, "Waiting for approval...")
 				return
 			}
@@ -137,9 +157,11 @@ func pairCommand(ctx context.Context, dir, base, name string, specs []string, d 
 	}
 	if d.human {
 		fmt.Fprintf(d.out, "Paired! Device ID: %s\n", state.DeviceID)
-		fmt.Fprintln(d.out, "Saved paused. To finish manually, run:")
-		fmt.Fprintln(d.out, "  souls-house-companion install --user")
-		fmt.Fprintln(d.out, "  souls-house-companion resume")
+		if !d.suppressNextSteps {
+			fmt.Fprintln(d.out, "Saved paused. To finish manually, run:")
+			fmt.Fprintln(d.out, "  souls-house-companion install --user")
+			fmt.Fprintln(d.out, "  souls-house-companion resume")
+		}
 		return nil
 	}
 	_ = enc.Encode(map[string]any{"event": "paired", "device_id": state.DeviceID, "paused": true})

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/swombat/souls-house-companion/internal/client"
 	"github.com/swombat/souls-house-companion/internal/volumes"
@@ -234,5 +235,171 @@ esac
 	}
 	if data, err := os.ReadFile(target); err != nil || string(data) != "keep" {
 		t.Fatalf("symlink target was touched: %v %q", err, data)
+	}
+}
+
+func TestLinuxSetupFailedStartRestoresPausedStateAndMarker(t *testing.T) {
+	p := newPairHarness(t, "approved")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+filepath.Join(home, "nonexistent-bus"))
+	bin := t.TempDir()
+	t.Setenv("PATH", bin)
+
+	script := `#!/bin/sh
+[ "$1" = "--user" ] || exit 98
+shift
+case "$1" in
+show-environment|daemon-reload|enable) exit 0 ;;
+start) exit 1 ;;
+*) exit 97 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, "state")
+	deps := setupDeps{
+		in:       strings.NewReader(""),
+		out:      &bytes.Buffer{},
+		home:     home,
+		hostname: func() (string, error) { return "box", nil },
+		mounts: func() ([]volumes.Mount, error) {
+			return []volumes.Mount{{Key: "k-root", Mountpoint: "/", Filesystem: "ext4"}}, nil
+		},
+		client:   p.deps.client,
+		now:      p.deps.now,
+		sleep:    p.deps.sleep,
+		platform: newSetupPlatform(),
+	}
+	err := setupCommand(context.Background(), home, []string{"--state-dir", dir, "--url", p.url, "--volume", "/", "--tray", "no", "--linger", "no", "--yes"}, deps)
+	if err == nil {
+		t.Fatal("expected failure when systemctl start fails")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "paused")); err != nil {
+		t.Fatalf("paused marker missing after failed start: %v", err)
+	}
+	state, err := client.Load(dir)
+	if err != nil {
+		t.Fatalf("client.Load: %v", err)
+	}
+	if !state.Paused {
+		t.Fatal("state.Paused was left false after failed start")
+	}
+}
+
+func TestLinuxSetupUninstallSetupRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+filepath.Join(home, "nonexistent-bus"))
+
+	h := &cmdHouse{claims: []string{"approved"}}
+	revokes := 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/companion/revoke" {
+			revokes++
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		h.handler(w, r)
+	}))
+	defer srv.Close()
+
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	defer func() { http.DefaultTransport = previousTransport }()
+
+	fakeSystemctl(t, `
+case "$1" in
+show-environment|daemon-reload|enable|start|stop|disable) exit 0 ;;
+show)
+  target="$4"
+  if [ -f "$HOME/.config/systemd/user/$target" ]; then
+    printf 'LoadState=loaded\nActiveState=inactive\n'
+  else
+    printf 'LoadState=not-found\nActiveState=inactive\n'
+  fi
+  ;;
+*) exit 97 ;;
+esac
+`)
+
+	dir := filepath.Join(home, "state")
+	c := client.New(nil)
+	c.HTTP.Transport = srv.Client().Transport
+	clock := time.Now()
+	makeDeps := func() setupDeps {
+		return setupDeps{
+			in:       strings.NewReader(""),
+			out:      &bytes.Buffer{},
+			home:     home,
+			hostname: func() (string, error) { return "roundtrip-box", nil },
+			mounts: func() ([]volumes.Mount, error) {
+				return []volumes.Mount{{Key: "k-root", Mountpoint: "/", Filesystem: "ext4"}}, nil
+			},
+			client:   c,
+			now:      func() time.Time { return clock },
+			sleep:    func(ctx context.Context, d time.Duration) error { clock = clock.Add(d); return ctx.Err() },
+			platform: newSetupPlatform(),
+		}
+	}
+
+	setupArgs := []string{"--state-dir", dir, "--url", srv.URL, "--volume", "/", "--tray", "no", "--linger", "no", "--yes"}
+	if err := setupCommand(context.Background(), home, setupArgs, makeDeps()); err != nil {
+		t.Fatalf("first setup failed: %v", err)
+	}
+	auditPath := filepath.Join(dir, "audit.jsonl")
+	if err := os.WriteFile(auditPath, []byte("{\"event\":\"policy.apply\"}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A live pairing must still be rejected by setup.
+	if err := setupCommand(context.Background(), home, setupArgs, makeDeps()); err == nil {
+		t.Fatal("setup allowed overwriting a live pairing")
+	}
+
+	if err := run([]string{"uninstall", "--user", "--state-dir", dir}); err != nil {
+		t.Fatalf("uninstall --user failed: %v", err)
+	}
+	if revokes != 1 {
+		t.Fatalf("expected 1 revoke, got %d", revokes)
+	}
+	st, err := client.Load(dir)
+	if err != nil || !st.Uninstalled || st.Credential != "" {
+		t.Fatalf("expected uninstall receipt, got st=%+v err=%v", st, err)
+	}
+
+	// Re-running setup from a verified uninstall receipt must succeed and keep audit.jsonl.
+	if err := setupCommand(context.Background(), home, setupArgs, makeDeps()); err != nil {
+		t.Fatalf("second setup after uninstall failed: %v", err)
+	}
+	st2, err := client.Load(dir)
+	if err != nil || st2.Uninstalled || st2.Paused || st2.Credential == "" {
+		t.Fatalf("expected fresh active pairing, got st=%+v err=%v", st2, err)
+	}
+	if data, err := os.ReadFile(auditPath); err != nil || !strings.Contains(string(data), "policy.apply") {
+		t.Fatalf("audit history was lost during re-setup: err=%v data=%q", err, data)
+	}
+}
+
+func TestLinuxBoundedTrayProbeTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	unblock := make(chan struct{})
+	defer close(unblock)
+	start := time.Now()
+	avail, reason := runBoundedTrayProbe(ctx, func(context.Context) (bool, string) {
+		<-unblock
+		return true, ""
+	})
+	elapsed := time.Since(start)
+	if avail {
+		t.Fatal("timed-out probe reported available")
+	}
+	if !strings.Contains(reason, "timed out") {
+		t.Fatalf("expected timeout reason, got %q", reason)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("probe did not return promptly on timeout: %v", elapsed)
 	}
 }

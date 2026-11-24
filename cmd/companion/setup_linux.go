@@ -70,26 +70,46 @@ func (linuxSetupPlatform) detectTrayHost(ctx context.Context) (bool, string) {
 }
 
 func checkStatusNotifierWatcher(ctx context.Context) (bool, string) {
-	conn, err := dbus.SessionBusPrivate()
-	if err != nil {
-		return false, "no desktop session D-Bus available (headless or SSH session)"
+	return runBoundedTrayProbe(ctx, func(probeCtx context.Context) (bool, string) {
+		conn, err := dbus.SessionBusPrivate()
+		if err != nil {
+			return false, "no desktop session D-Bus available (headless or SSH session)"
+		}
+		defer conn.Close()
+		if err := conn.Auth(nil); err != nil {
+			return false, "desktop session D-Bus unavailable"
+		}
+		if err := conn.Hello(); err != nil {
+			return false, "desktop session D-Bus unavailable"
+		}
+		var hasOwner bool
+		call := conn.BusObject().CallWithContext(probeCtx, "org.freedesktop.DBus.NameHasOwner", 0, "org.kde.StatusNotifierWatcher")
+		if err := call.Store(&hasOwner); err != nil {
+			return false, "could not query session D-Bus for a system tray host"
+		}
+		if !hasOwner {
+			return false, "no system tray host (org.kde.StatusNotifierWatcher) running; stock GNOME needs the AppIndicator extension"
+		}
+		return true, ""
+	})
+}
+
+func runBoundedTrayProbe(ctx context.Context, fn func(context.Context) (bool, string)) (bool, string) {
+	type probeResult struct {
+		avail  bool
+		reason string
 	}
-	defer conn.Close()
-	if err := conn.Auth(nil); err != nil {
-		return false, "desktop session D-Bus unavailable"
+	ch := make(chan probeResult, 1)
+	go func() {
+		avail, reason := fn(ctx)
+		ch <- probeResult{avail: avail, reason: reason}
+	}()
+	select {
+	case res := <-ch:
+		return res.avail, res.reason
+	case <-ctx.Done():
+		return false, "timed out checking session D-Bus for a system tray host"
 	}
-	if err := conn.Hello(); err != nil {
-		return false, "desktop session D-Bus unavailable"
-	}
-	var hasOwner bool
-	call := conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.NameHasOwner", 0, "org.kde.StatusNotifierWatcher")
-	if err := call.Store(&hasOwner); err != nil {
-		return false, "could not query session D-Bus for a system tray host"
-	}
-	if !hasOwner {
-		return false, "no system tray host (org.kde.StatusNotifierWatcher) running; stock GNOME needs the AppIndicator extension"
-	}
-	return true, ""
 }
 
 func (linuxSetupPlatform) installTray(ctx context.Context) error {

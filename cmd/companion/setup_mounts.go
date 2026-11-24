@@ -202,6 +202,12 @@ func resolveVolumeSpecs(allMounts []volumes.Mount, offered []offeredMount, rawSp
 				nil,
 			)
 		}
+		if excludedSetupMountpoint(matched.Mountpoint) {
+			return nil, nil, newUserError(
+				fmt.Sprintf("companion setup: mount %q is excluded from setup (boot/system mount)", sanitizeToken(matched.Mountpoint)),
+				nil,
+			)
+		}
 		if seen[matched.Key] {
 			return nil, nil, newUserError(
 				fmt.Sprintf("companion setup: duplicate volume %q", sanitizeToken(matched.Mountpoint)),

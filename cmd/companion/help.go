@@ -179,6 +179,7 @@ Flags:
   --name NAME          Computer name shown in the house (default hostname)
   --volume SPEC        Volume mountpoint or key to offer, with optional =read or =write
                        (repeatable; e.g. --volume / --volume /mnt/data=write)
+                       /boot, /efi, /snap, and container storage mounts are excluded
   --write              Default selected volumes to read and write instead of read-only
   --tray MODE          Tray installation: auto, yes, or no (default "auto")
   --linger MODE        Linux systemd lingering: auto, yes, or no (default "auto")

@@ -110,11 +110,8 @@ func setupCommand(ctx context.Context, home string, args []string, d setupDeps) 
 	unit := userUnitPath(home)
 
 	// Refuse to overwrite an existing pairing before touching the network.
-	if _, err := os.Lstat(filepath.Join(absDir, "state.json")); !os.IsNotExist(err) {
-		if err == nil {
-			return newUserError("companion setup: this computer is already paired (check 'souls-house-companion status' or run 'souls-house-companion uninstall --user' first)", nil)
-		}
-		return err
+	if err := canPairOverState(absDir); err != nil {
+		return newUserError("companion setup: this computer is already paired (check 'souls-house-companion status' or run 'souls-house-companion uninstall --user' first)", err)
 	}
 
 	// Check the local user service manager before requesting any pairing code.
@@ -207,12 +204,13 @@ func setupCommand(ctx context.Context, home string, args []string, d setupDeps) 
 		return err
 	}
 	pDeps := pairDeps{
-		mounts: func() ([]volumes.Mount, error) { return allMounts, nil },
-		client: d.client,
-		out:    d.out,
-		now:    d.now,
-		sleep:  d.sleep,
-		human:  true,
+		mounts:            func() ([]volumes.Mount, error) { return allMounts, nil },
+		client:            d.client,
+		out:               d.out,
+		now:               d.now,
+		sleep:             d.sleep,
+		human:             true,
+		suppressNextSteps: true,
 	}
 	if err := pairCommand(ctx, absDir, houseURL, compName, pairSpecs, pDeps); err != nil {
 		lock.Close()
@@ -246,7 +244,15 @@ func setupCommand(ctx context.Context, home string, args []string, d setupDeps) 
 				markerErr = marker.Sync()
 				marker.Close()
 			}
-			return errors.Join(err, markerErr)
+			var saveErr error
+			if reLock, lockErr := client.Lock(absDir); lockErr == nil {
+				state.Paused = true
+				saveErr = client.Save(absDir, state)
+				reLock.Close()
+			} else {
+				saveErr = lockErr
+			}
+			return errors.Join(err, markerErr, saveErr)
 		}
 		serviceStarted = true
 	} else {
@@ -284,11 +290,15 @@ func validateTriMode(flagName, value string) error {
 	}
 }
 
+const trayProbeTimeout = 5 * time.Second
+
 func setupTray(ctx context.Context, d setupDeps, mode string) string {
 	if mode == "no" {
 		return "skipped (--tray=no)"
 	}
-	avail, reason := d.platform.detectTrayHost(ctx)
+	probeCtx, cancel := context.WithTimeout(ctx, trayProbeTimeout)
+	defer cancel()
+	avail, reason := d.platform.detectTrayHost(probeCtx)
 	if !avail {
 		if mode == "yes" {
 			if err := d.platform.installTray(ctx); err != nil {
