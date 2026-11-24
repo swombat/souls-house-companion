@@ -83,6 +83,9 @@ func writeHelp(w io.Writer, topic string) error {
 	case "setup":
 		_, err := fmt.Fprint(w, setupHelpText)
 		return err
+	case "commands":
+		_, err := fmt.Fprint(w, commandsHelpText)
+		return err
 	case "pair":
 		_, err := fmt.Fprint(w, pairHelpText)
 		return err
@@ -141,6 +144,7 @@ Usage:
 
 Getting started:
   setup              Guided pairing, service installation, and optional tray setup
+  commands on|off    Allow or disallow paired residents running local commands
   status             Show local pairing, pause state, and ceiling JSON
   pause              Stop the companion and refuse all remote requests
   resume             Clear local pause and start the companion service
@@ -185,6 +189,25 @@ Flags:
   --linger MODE        Linux systemd lingering: auto, yes, or no (default "auto")
   --no-start           Install the service but leave the companion paused
   -y, --yes            Accept defaults and skip confirmation prompts
+  --state-dir PATH     Private state directory
+`
+
+const commandsHelpText = `Usage: souls-house-companion commands <on|off|status> [--all] [--state-dir PATH]
+
+Turn local command execution on or off for all paired residents on this computer,
+or print the current local command status.
+
+Turning commands on or off stops the service if it is currently running, records
+a policy.apply entry in audit.jsonl, updates the local ceiling's execute flag
+for already-paired residents without changing volume grants, and restarts the
+service only if it was running before. A paused or stopped companion is never
+started.
+
+When a per-resident policy already allows some residents and not others,
+'commands on' refuses unless --all is passed, and lists who would be added.
+
+Flags:
+  --all                With 'on', widen a mixed per-resident policy to all paired residents
   --state-dir PATH     Private state directory
 `
 

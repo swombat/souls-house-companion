@@ -21,7 +21,9 @@ type snapshot struct {
 	// active: its user service is actually running. Enrolled and not paused
 	// is not enough on its own (Mira, #32): the service may never have been
 	// installed, or may have stopped.
-	active bool
+	active          bool
+	hasResidents    bool
+	commandsAllowed bool
 }
 
 func (s snapshot) mark() mark {
@@ -40,6 +42,25 @@ func (s snapshot) mark() mark {
 // canToggle: Pause needs a running service, Resume needs a paused one.
 func (s snapshot) canToggle() bool {
 	return s.reachable && (s.paused || s.active)
+}
+
+// canToggleCommands: toggling commands requires an enrolled companion; turning
+// commands on requires at least one paired resident in the local ceiling.
+func (s snapshot) canToggleCommands() bool {
+	if !s.reachable {
+		return false
+	}
+	return s.commandsAllowed || s.hasResidents
+}
+
+// commandsToggleTitle returns the tray menu label for Run commands. When any
+// resident is allowed (including a mixed per-resident ceiling), the tray offers
+// only turning commands off, never widening to everyone.
+func (s snapshot) commandsToggleTitle() string {
+	if s.canToggleCommands() && s.commandsAllowed {
+		return "Stop allowing commands"
+	}
+	return "Let residents run commands…"
 }
 
 func (s snapshot) label() string {
@@ -69,11 +90,29 @@ func parseStatus(out []byte, err error, active bool) snapshot {
 	var st struct {
 		Paused   *bool `json:"paused"`
 		Enrolled *bool `json:"enrolled"`
+		Ceiling  struct {
+			Residents []struct {
+				Execute bool `json:"execute"`
+			} `json:"residents"`
+		} `json:"ceiling"`
 	}
 	if json.Unmarshal(out, &st) != nil || st.Paused == nil || st.Enrolled == nil || !*st.Enrolled {
 		return snapshot{}
 	}
-	return snapshot{reachable: true, paused: *st.Paused, active: active}
+	commandsAllowed := false
+	for _, r := range st.Ceiling.Residents {
+		if r.Execute {
+			commandsAllowed = true
+			break
+		}
+	}
+	return snapshot{
+		reachable:       true,
+		paused:          *st.Paused,
+		active:          active,
+		hasResidents:    len(st.Ceiling.Residents) > 0,
+		commandsAllowed: commandsAllowed,
+	}
 }
 
 const companionUnit = "souls-house-companion.service"

@@ -43,6 +43,20 @@ func TestParseStatus(t *testing.T) {
 	if tip := (snapshot{reachable: true, active: true}).tooltip(); tip != "souls.house: companion running" {
 		t.Errorf("tooltip %q", tip)
 	}
+
+	// Commands readiness parsed from status --json ceiling.residents.
+	off := parseStatus([]byte(`{"paused":false,"enrolled":true,"ceiling":{"residents":[{"id":"r1","execute":false}]}}`), nil, true)
+	if !off.hasResidents || off.commandsAllowed || !off.canToggleCommands() || off.commandsToggleTitle() != "Let residents run commands…" {
+		t.Fatalf("expected residents present with commands off: %+v", off)
+	}
+	mixed := parseStatus([]byte(`{"paused":false,"enrolled":true,"ceiling":{"residents":[{"id":"r1","execute":true},{"id":"r2","execute":false},{"id":"r3","execute":false}]}}`), nil, true)
+	if !mixed.hasResidents || !mixed.commandsAllowed || !mixed.canToggleCommands() || mixed.commandsToggleTitle() != "Stop allowing commands" {
+		t.Fatalf("expected mixed ceiling to offer only Stop allowing commands: %+v title=%q", mixed, mixed.commandsToggleTitle())
+	}
+	empty := parseStatus([]byte(`{"paused":false,"enrolled":true,"ceiling":{"residents":[]}}`), nil, true)
+	if empty.hasResidents || empty.commandsAllowed || empty.canToggleCommands() {
+		t.Fatalf("expected cannot toggle commands with no paired residents: %+v", empty)
+	}
 }
 
 // A fake systemctl on PATH that records its arguments and fails when told to.

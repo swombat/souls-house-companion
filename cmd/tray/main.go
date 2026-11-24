@@ -42,16 +42,17 @@ func command(args []string) error {
 }
 
 type tray struct {
-	mu         sync.Mutex
-	renderMu   sync.Mutex // one complete render at a time (the systray setters are unsynchronised)
-	snap       snapshot
-	inProgress string
-	failed     string
-	refreshing bool
-	coord      *coordinator
-	icons      map[mark][]byte
+	mu                 sync.Mutex
+	renderMu           sync.Mutex // one complete render at a time (the systray setters are unsynchronised)
+	snap               snapshot
+	inProgress         string
+	failed             string
+	confirmingCommands bool
+	refreshing         bool
+	coord              *coordinator
+	icons              map[mark][]byte
 
-	status, toggle, note, about, quit *systray.MenuItem
+	status, toggle, commandsToggle, commandsConfirm, commandsCancel, note, about, quit *systray.MenuItem
 }
 
 func onReady() {
@@ -63,6 +64,11 @@ func onReady() {
 	t.status = systray.AddMenuItem("Companion: …", "")
 	t.status.Disable()
 	t.toggle = systray.AddMenuItem("Pause companion", "Stop the companion now; nothing runs until you resume it")
+	t.commandsToggle = systray.AddMenuItem("Let residents run commands…", "Allow or disallow paired residents running commands on this computer")
+	t.commandsConfirm = systray.AddMenuItem("Confirm: allow full user shell access", "Allows paired residents with house permission to run commands as your user")
+	t.commandsConfirm.Hide()
+	t.commandsCancel = systray.AddMenuItem("Cancel", "Keep commands off")
+	t.commandsCancel.Hide()
 	t.note = systray.AddMenuItem("", "")
 	t.note.Disable()
 	t.note.Hide()
@@ -83,6 +89,12 @@ func (t *tray) loop() {
 			t.refresh()
 		case <-t.toggle.ClickedCh:
 			t.togglePause()
+		case <-t.commandsToggle.ClickedCh:
+			t.clickCommandsToggle()
+		case <-t.commandsConfirm.ClickedCh:
+			t.setCommands(true)
+		case <-t.commandsCancel.ClickedCh:
+			t.cancelCommandsConfirm()
 		case <-t.about.ClickedCh:
 			_ = exec.Command("xdg-open", aboutURL).Start()
 		case <-t.quit.ClickedCh:
@@ -109,10 +121,69 @@ func (t *tray) refresh() {
 		t.refreshing = false
 		if t.coord.isCurrent(generation) {
 			t.snap = snap
+			if !snap.reachable || snap.commandsAllowed {
+				t.confirmingCommands = false
+			}
 		}
 		t.mu.Unlock()
 		t.render()
 	}()
+}
+
+func (t *tray) clickCommandsToggle() {
+	t.mu.Lock()
+	if !t.snap.canToggleCommands() || t.inProgress != "" {
+		t.mu.Unlock()
+		return
+	}
+	if t.snap.commandsAllowed {
+		t.confirmingCommands = false
+		t.mu.Unlock()
+		t.setCommands(false)
+		return
+	}
+	t.confirmingCommands = true
+	t.failed = ""
+	t.mu.Unlock()
+	t.render()
+}
+
+func (t *tray) cancelCommandsConfirm() {
+	t.mu.Lock()
+	t.confirmingCommands = false
+	t.mu.Unlock()
+	t.render()
+}
+
+func (t *tray) setCommands(allow bool) {
+	t.mu.Lock()
+	if !t.snap.canToggleCommands() || t.inProgress != "" {
+		t.mu.Unlock()
+		return
+	}
+	label, arg := "Stop allowing commands", "off"
+	if allow {
+		label, arg = "Allow commands", "on"
+	}
+	t.confirmingCommands = false
+	t.inProgress, t.failed = label, ""
+	t.mu.Unlock()
+	t.render()
+	t.coord.change(func() bool {
+		_, err := runCompanion(40*time.Second, "commands", arg)
+		return err == nil
+	}, func(ok bool) {
+		t.mu.Lock()
+		if !t.coord.busy() {
+			t.inProgress = ""
+		}
+		if !ok {
+			t.failed = "Could not " + lowerFirst(label)
+		}
+		t.mu.Unlock()
+		t.render()
+		t.refresh()
+	})
 }
 
 func (t *tray) togglePause() {
@@ -126,6 +197,7 @@ func (t *tray) togglePause() {
 	if resume {
 		label, arg = "Resume companion", "resume"
 	}
+	t.confirmingCommands = false
 	t.inProgress, t.failed = label, ""
 	t.mu.Unlock()
 	t.render()
@@ -152,7 +224,7 @@ func (t *tray) render() {
 	t.renderMu.Lock()
 	defer t.renderMu.Unlock()
 	t.mu.Lock()
-	snap, inProgress, failed := t.snap, t.inProgress, t.failed
+	snap, inProgress, failed, confirming := t.snap, t.inProgress, t.failed, t.confirmingCommands
 	t.mu.Unlock()
 	systray.SetIcon(t.icons[snap.mark()])
 	systray.SetTooltip(snap.tooltip())
@@ -170,6 +242,26 @@ func (t *tray) render() {
 	default:
 		t.toggle.SetTitle("Pause companion")
 		t.toggle.Enable()
+	}
+	switch {
+	case inProgress != "":
+		t.commandsToggle.Disable()
+	case !snap.canToggleCommands():
+		t.commandsToggle.SetTitle(snap.commandsToggleTitle())
+		t.commandsToggle.Disable()
+	case snap.commandsAllowed:
+		t.commandsToggle.SetTitle(snap.commandsToggleTitle())
+		t.commandsToggle.Enable()
+	default:
+		t.commandsToggle.SetTitle(snap.commandsToggleTitle())
+		t.commandsToggle.Enable()
+	}
+	if confirming && inProgress == "" && snap.canToggleCommands() && !snap.commandsAllowed {
+		t.commandsConfirm.Show()
+		t.commandsCancel.Show()
+	} else {
+		t.commandsConfirm.Hide()
+		t.commandsCancel.Hide()
 	}
 	if failed != "" {
 		t.note.SetTitle(failed)

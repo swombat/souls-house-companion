@@ -93,7 +93,7 @@ func TestCeilingReportFollowsReadyWithEpochAndKeysOnly(t *testing.T) {
 		switch k {
 		case "action", "connection_epoch", "ceiling":
 		case "execute_lifecycle_accepted":
-			if executeLifecycleReport("") == nil {
+			if executeLifecycleReport("", policy.Policy{}, policy.Policy{}) == nil {
 				t.Fatalf("opt-in reported on a platform without one: %s", frame.Data)
 			}
 		default:

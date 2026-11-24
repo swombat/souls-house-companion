@@ -64,7 +64,7 @@ func (f *fakeSetupPlatform) enableLinger(context.Context) error {
 }
 
 func TestHelpTopicsAndDiagnostics(t *testing.T) {
-	for _, topic := range []string{"", "setup", "pair", "status", "pause", "resume", "install", "uninstall", "volumes", "policy", "enroll", "serve", "execute-lifecycle", "accessibility", "desktop", "version"} {
+	for _, topic := range []string{"", "setup", "commands", "pair", "status", "pause", "resume", "install", "uninstall", "volumes", "policy", "enroll", "serve", "execute-lifecycle", "accessibility", "desktop", "version"} {
 		var buf bytes.Buffer
 		if err := writeHelp(&buf, topic); err != nil {
 			t.Fatalf("writeHelp(%q): %v", topic, err)
