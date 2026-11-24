@@ -44,8 +44,10 @@ func platformDiagnostic(err error) string {
 	if errors.As(err, &failure) {
 		return fmt.Sprintf("companion: launchctl %s failed (exit %d); verify GUI login and owner Login Items setting; configuration remains installed", failure.operation, failure.code)
 	}
-	return "companion: command failed; check configuration, authority and service status"
+	return ""
 }
+
+func uninstallTrayUnit(_ context.Context, _ string) error { return nil }
 
 func userUnitPath(home string) string {
 	return filepath.Join(home, "Library/LaunchAgents", companionLabel+".plist")

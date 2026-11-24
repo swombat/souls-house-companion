@@ -11,6 +11,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// ErrLocked is returned by Lock when another companion process holds the state lock.
+var ErrLocked = errors.New("companion is already running")
+
 // State is private; never print or log it. PendingSession is persisted before
 // credential exchange so a lost HTTP response can be retried with the same ID.
 type State struct {
@@ -106,7 +109,7 @@ func Lock(dir string) (*os.File, error) {
 	}
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		f.Close()
-		return nil, errors.New("companion is already running")
+		return nil, ErrLocked
 	}
 	return f, nil
 }
