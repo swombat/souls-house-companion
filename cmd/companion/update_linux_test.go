@@ -41,54 +41,60 @@ func TestLinuxVerifyRunningBinaryWithProc(t *testing.T) {
 
 	// 1. Matching exe symlink succeeds (no network needed; offline house is fine).
 	_ = os.Symlink(newBin, exeLink)
-	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("active", 12345), time.Second); err != nil {
+	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("active", 12345), 50*time.Millisecond); err != nil {
 		t.Fatalf("expected matching exe to succeed, got %v", err)
 	}
 
 	// 2. Exe symlink pointing to a different binary fails.
 	_ = os.Remove(exeLink)
 	_ = os.Symlink(otherBin, exeLink)
-	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("active", 12345), time.Second); err == nil {
+	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("active", 12345), 50*time.Millisecond); err == nil {
 		t.Fatal("expected mismatched exe to fail")
 	}
 
 	// 3. Exe symlink ending in " (deleted)" (stale daemon still serving) fails.
 	_ = os.Remove(exeLink)
 	_ = os.Symlink(newBin+" (deleted)", exeLink)
-	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("active", 12345), time.Second); err == nil {
+	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("active", 12345), 50*time.Millisecond); err == nil {
 		t.Fatal("expected deleted exe symlink to fail")
 	}
 
 	// 4. Failed systemd state fails immediately.
-	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("failed", 0), time.Second); err == nil {
+	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("failed", 0), 50*time.Millisecond); err == nil {
 		t.Fatal("expected failed unit state to fail")
 	}
 }
 
-func TestParseSystemdExecStartBinary(t *testing.T) {
+func TestParseSystemdExecStart(t *testing.T) {
 	cases := []struct {
 		name    string
 		unit    string
-		want    string
+		want    installedUnitConfig
 		wantOK  bool
 		wantErr bool
 	}{
 		{
-			name:   "quoted",
-			unit:   "[Service]\nExecStart=\"/home/u/custom/souls-house-companion\" serve --state-dir \"/home/u/state\"\n",
-			want:   "/home/u/custom/souls-house-companion",
+			name:   "quoted_with_state_dir",
+			unit:   "[Service]\nExecStart=\"/home/u/custom/souls-house-companion\" serve --state-dir \"/home/u/custom state\"\n",
+			want:   installedUnitConfig{binaryPath: "/home/u/custom/souls-house-companion", stateDir: "/home/u/custom state"},
+			wantOK: true,
+		},
+		{
+			name:   "equals_state_dir",
+			unit:   "[Service]\nExecStart=/home/u/custom/souls-house-companion serve --state-dir=/home/u/state\n",
+			want:   installedUnitConfig{binaryPath: "/home/u/custom/souls-house-companion", stateDir: "/home/u/state"},
 			wantOK: true,
 		},
 		{
 			name:   "unquoted",
 			unit:   "[Service]\nExecStart=/home/u/.local/bin/souls-house-companion serve\n",
-			want:   "/home/u/.local/bin/souls-house-companion",
+			want:   installedUnitConfig{binaryPath: "/home/u/.local/bin/souls-house-companion"},
 			wantOK: true,
 		},
 		{
 			name:   "prefixed",
 			unit:   "[Service]\nExecStart=-/home/u/.local/bin/souls-house-companion serve\n",
-			want:   "/home/u/.local/bin/souls-house-companion",
+			want:   installedUnitConfig{binaryPath: "/home/u/.local/bin/souls-house-companion"},
 			wantOK: true,
 		},
 		{
@@ -96,67 +102,64 @@ func TestParseSystemdExecStartBinary(t *testing.T) {
 			unit:   "[Unit]\nDescription=test\n",
 			wantOK: false,
 		},
+		{
+			name:    "relative_state_dir",
+			unit:    "[Service]\nExecStart=/home/u/bin/souls-house-companion serve --state-dir relative/state\n",
+			wantErr: true,
+		},
+		{
+			name:    "unclosed_quote",
+			unit:    "[Service]\nExecStart=\"/home/u/bin/souls-house-companion serve\n",
+			wantErr: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok, err := parseSystemdExecStartBinary(tc.unit)
+			got, ok, err := parseSystemdExecStart(tc.unit)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
 			}
 			if ok != tc.wantOK || got != tc.want {
-				t.Fatalf("got (%q, %v), want (%q, %v)", got, ok, tc.want, tc.wantOK)
+				t.Fatalf("got (%+v, %v), want (%+v, %v)", got, ok, tc.want, tc.wantOK)
 			}
 		})
 	}
 }
 
-func buildTestReleaseServer(t *testing.T, ver string, badChecksum bool) (*httptest.Server, string) {
+func buildTestReleaseDir(t *testing.T, ver string) string {
 	t.Helper()
 	repoRoot, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
 	}
-	buildDir := t.TempDir()
-	compBin := filepath.Join(buildDir, "souls-house-companion")
-	trayBin := filepath.Join(buildDir, "souls-house-tray")
-
-	for _, target := range []struct {
-		pkg string
-		out string
-	}{
-		{"./cmd/companion", compBin},
-		{"./cmd/tray", trayBin},
-	} {
-		cmd := exec.Command("go", "build", "-ldflags=-X main.version="+ver, "-o", target.out, target.pkg)
-		cmd.Dir = repoRoot
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("go build %s failed: %v\n%s", target.pkg, err, out)
-		}
+	distDir := t.TempDir()
+	cmd := exec.Command("sh", filepath.Join(repoRoot, "scripts", "build-linux.sh"), distDir, ver)
+	cmd.Dir = repoRoot
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("scripts/build-linux.sh failed: %v\n%s", err, out)
 	}
+	return distDir
+}
 
-	compBytes, err := os.ReadFile(compBin)
+func serveReleaseDir(t *testing.T, distDir, ver string, badChecksum bool) (*httptest.Server, string) {
+	t.Helper()
+	assetFile := fmt.Sprintf("souls-house-companion-%s-linux-%s.tar.gz", ver, runtime.GOARCH)
+	tarBytes, err := os.ReadFile(filepath.Join(distDir, assetFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	trayBytes, err := os.ReadFile(trayBin)
+	sumsBytes, err := os.ReadFile(filepath.Join(distDir, "SHA256SUMS"))
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	dirName := fmt.Sprintf("souls-house-companion-%s-linux-%s", ver, runtime.GOARCH)
-	assetFile := dirName + ".tar.gz"
-	tarBytes, sum := makeReleaseTarball(t, dirName, map[string][]byte{
-		"souls-house-companion": compBytes,
-		"souls-house-tray":      trayBytes,
-	})
 	if badChecksum {
-		sum = strings.Repeat("f", 64)
+		sumsBytes = []byte(fmt.Sprintf("%s  %s\n", strings.Repeat("f", 64), assetFile))
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/SHA256SUMS":
-			fmt.Fprintf(w, "%s  %s\n", sum, assetFile)
+			_, _ = w.Write(sumsBytes)
 		case "/" + assetFile:
 			_, _ = w.Write(tarBytes)
 		default:
@@ -164,20 +167,7 @@ func buildTestReleaseServer(t *testing.T, ver string, badChecksum bool) (*httpte
 		}
 	}))
 	t.Cleanup(srv.Close)
-
-	// Stamp the release-generated installer script using the exact sed rule from
-	// scripts/build-linux.sh so the tests exercise the real published script
-	// without passing --version.
-	stampedScript := filepath.Join(t.TempDir(), "install-linux.sh")
-	sedCmd := exec.Command("sed", fmt.Sprintf(`s|^RELEASE_VERSION=""$|RELEASE_VERSION="%s"|`, ver), filepath.Join(repoRoot, "scripts", "install-linux.sh"))
-	stampedBytes, err := sedCmd.Output()
-	if err != nil {
-		t.Fatalf("stamping install-linux.sh failed: %v", err)
-	}
-	if err := os.WriteFile(stampedScript, stampedBytes, 0755); err != nil {
-		t.Fatal(err)
-	}
-	return srv, stampedScript
+	return srv, filepath.Join(distDir, "install-linux.sh")
 }
 
 // TestLinuxInstallScriptLegacyAae878cUpgrade tests the install-linux.sh entry
@@ -190,7 +180,8 @@ func TestLinuxInstallScriptLegacyAae878cUpgrade(t *testing.T) {
 		t.Skip("skipping installer integration test in short mode")
 	}
 	ver := "v0.9.0"
-	srv, scriptPath := buildTestReleaseServer(t, ver, false)
+	distDir := buildTestReleaseDir(t, ver)
+	srv, scriptPath := serveReleaseDir(t, distDir, ver, false)
 
 	home := t.TempDir()
 	installDir := filepath.Join(home, ".local", "bin")
@@ -342,9 +333,10 @@ func TestLinuxInstallScriptBadChecksumAndPausedDevice(t *testing.T) {
 		t.Skip("skipping installer integration test in short mode")
 	}
 	ver := "v0.9.0"
+	distDir := buildTestReleaseDir(t, ver)
 
 	t.Run("bad_checksum_leaves_old_service_untouched", func(t *testing.T) {
-		srv, scriptPath := buildTestReleaseServer(t, ver, true)
+		srv, scriptPath := serveReleaseDir(t, distDir, ver, true)
 		home := t.TempDir()
 		installDir := filepath.Join(home, ".local", "bin")
 		stateDir := filepath.Join(home, ".local", "share", "souls-house-companion")
@@ -379,7 +371,7 @@ func TestLinuxInstallScriptBadChecksumAndPausedDevice(t *testing.T) {
 	})
 
 	t.Run("paused_device_stays_paused", func(t *testing.T) {
-		srv, scriptPath := buildTestReleaseServer(t, ver, false)
+		srv, scriptPath := serveReleaseDir(t, distDir, ver, false)
 		home := t.TempDir()
 		installDir := filepath.Join(home, ".local", "bin")
 		stateDir := filepath.Join(home, ".local", "share", "souls-house-companion")
@@ -420,6 +412,86 @@ exit 0
 		st, err := client.Load(stateDir)
 		if err != nil || !st.Paused {
 			t.Fatalf("paused state lost: st=%+v err=%v", st, err)
+		}
+	})
+
+	t.Run("existing_unit_custom_state_omitting_flags", func(t *testing.T) {
+		srv, scriptPath := serveReleaseDir(t, distDir, ver, false)
+		home := t.TempDir()
+		customInstallDir := filepath.Join(home, "custom-bin")
+		customStateDir := filepath.Join(home, "custom-state")
+		otherStateDir := filepath.Join(home, "wrong-state")
+		if err := os.MkdirAll(customInstallDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		oldBin := filepath.Join(customInstallDir, "souls-house-companion")
+		if err := os.WriteFile(oldBin, []byte("#!/bin/sh\necho aae878c\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.Save(customStateDir, client.State{DeviceID: "custom-dev", Credential: "c", Paused: true}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(customStateDir, "paused"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		// Install unit file matching lifecycle_linux.go installUnit format.
+		unitPath := userUnitPath(home)
+		if err := os.MkdirAll(filepath.Dir(unitPath), 0700); err != nil {
+			t.Fatal(err)
+		}
+		unitContent := fmt.Sprintf("[Unit]\nDescription=souls.house Companion\n\n[Service]\nExecStart=\"%s\" serve --state-dir \"%s\"\n", oldBin, customStateDir)
+		if err := os.WriteFile(unitPath, []byte(unitContent), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		fakeBin := t.TempDir()
+		logFile := filepath.Join(fakeBin, "systemctl.log")
+		// Report active if queried so any missed pause check in customStateDir
+		// would attempt to stop/start the unit and fail this test.
+		if err := os.WriteFile(filepath.Join(fakeBin, "systemctl"), []byte(fmt.Sprintf(`#!/bin/sh
+echo "$*" >> %q
+case "$*" in
+  *"show"*) printf 'LoadState=loaded\nActiveState=active\n'; exit 0 ;;
+esac
+exit 0
+`, logFile)), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		env := []string{"HOME=" + home, "PATH=" + fakeBin + string(os.PathListSeparator) + os.Getenv("PATH")}
+
+		// 1. Explicit conflicting --state-dir must be rejected without touching the binary.
+		badCmd := exec.Command("sh", scriptPath, "--state-dir", otherStateDir, "--release-base-url", srv.URL)
+		badCmd.Env = env
+		badOut, err := badCmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(badOut), "disagrees with installed service unit state directory") {
+			t.Fatalf("expected conflicting --state-dir refusal, err=%v out=%s", err, badOut)
+		}
+		if got, _ := exec.Command(oldBin, "version").Output(); strings.TrimSpace(string(got)) != "aae878c" {
+			t.Fatalf("binary modified despite conflicting --state-dir: %q", got)
+		}
+
+		// 2. Omitting --install-dir, --state-dir, --version, and --no-setup must
+		// upgrade the unit's custom binary, respect Pause in the unit's custom
+		// state directory, and not fall into fresh setup.
+		cmd := exec.Command("sh", scriptPath, "--release-base-url", srv.URL)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("installer omitting dir flags failed: %v\noutput:\n%s", err, out)
+		}
+		if strings.Contains(string(out), "to pair this computer") || strings.Contains(string(out), "setup") {
+			t.Fatalf("installer must not offer fresh setup for existing unit; output:\n%s", out)
+		}
+		gotVer, err := exec.Command(oldBin, "version").Output()
+		if err != nil || strings.TrimSpace(string(gotVer)) != ver {
+			t.Fatalf("custom unit binary version = %q (err=%v), want %q", gotVer, err, ver)
+		}
+		if _, err := os.Lstat(filepath.Join(home, ".local", "bin", "souls-house-companion")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("default ~/.local/bin should not have been populated: err=%v", err)
+		}
+		if logs, err := os.ReadFile(logFile); err == nil && (strings.Contains(string(logs), " stop ") || strings.Contains(string(logs), " start ")) {
+			t.Fatalf("paused custom-state unit must not be stopped or started; systemctl log:\n%s", logs)
 		}
 	})
 }

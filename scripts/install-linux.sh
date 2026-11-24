@@ -29,6 +29,7 @@ version="$RELEASE_VERSION"
 install_dir="${HOME:?HOME must be set}/.local/bin"
 install_dir_explicit=0
 state_dir="${HOME}/.local/share/souls-house-companion"
+state_dir_explicit=0
 release_base_url=""
 force=0
 no_setup=0
@@ -49,6 +50,7 @@ while [ "$#" -gt 0 ]; do
     --state-dir)
       [ "$#" -ge 2 ] || { echo "install-linux.sh: --state-dir requires a value" >&2; exit 2; }
       state_dir="$2"
+      state_dir_explicit=1
       shift 2
       ;;
     --release-base-url)
@@ -201,7 +203,10 @@ fi
 
 # Invoke upgrade-from on the verified staged binary (not any pre-existing binary,
 # which may be a legacy commit-stamped build that does not know upgrade-from).
-set -- upgrade-from --state-dir "$state_dir"
+set -- upgrade-from
+if [ "$state_dir_explicit" -eq 1 ]; then
+  set -- "$@" --state-dir "$state_dir"
+fi
 if [ "$install_dir_explicit" -eq 1 ]; then
   set -- "$@" --install-dir "$install_dir"
 fi
@@ -211,7 +216,8 @@ fi
 set -- "$@" "$staged_dir"
 "$staged_bin" "$@"
 
-if [ "$no_setup" -eq 0 ] && [ ! -f "${state_dir}/state.json" ]; then
+unit_file="${HOME}/.config/systemd/user/souls-house-companion.service"
+if [ "$no_setup" -eq 0 ] && [ ! -f "${state_dir}/state.json" ] && [ ! -e "$unit_file" ]; then
   if [ -t 0 ]; then
     "${install_dir}/souls-house-companion" setup --state-dir "$state_dir"
   else

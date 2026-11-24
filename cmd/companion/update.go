@@ -18,37 +18,42 @@ import (
 	"github.com/swombat/souls-house-companion/internal/client"
 )
 
+type installedUnitConfig struct {
+	binaryPath string
+	stateDir   string
+}
+
 type updateDeps struct {
-	out                     io.Writer
-	httpClient              *http.Client
-	releaseAPIURL           string
-	enforceReleaseHosts     bool
-	currentVersion          string
-	defaultInstallDir       func(home string) string
-	installedUnitBinaryPath func(home string) (string, bool, error)
-	unitRunning             func(context.Context) (bool, error)
-	stopUnit                func(context.Context) error
-	startUnit               func(string) error
-	restartTrayUnit         func(context.Context) error
-	verifyRunningBinary     func(ctx context.Context, expectedBin string) error
-	queryBinaryVersion      func(ctx context.Context, binPath string) (string, error)
+	out                 io.Writer
+	httpClient          *http.Client
+	releaseAPIURL       string
+	enforceReleaseHosts bool
+	currentVersion      string
+	defaultInstallDir   func(home string) string
+	installedUnitConfig func(home string) (installedUnitConfig, bool, error)
+	unitRunning         func(context.Context) (bool, error)
+	stopUnit            func(context.Context) error
+	startUnit           func(string) error
+	restartTrayUnit     func(context.Context) error
+	verifyRunningBinary func(ctx context.Context, expectedBin string) error
+	queryBinaryVersion  func(ctx context.Context, binPath string) (string, error)
 }
 
 func defaultUpdateDeps() updateDeps {
 	return updateDeps{
-		out:                     os.Stdout,
-		httpClient:              defaultReleaseHTTPClient(),
-		releaseAPIURL:           defaultLatestReleaseURL,
-		enforceReleaseHosts:     true,
-		currentVersion:          version,
-		defaultInstallDir:       defaultInstallDir,
-		installedUnitBinaryPath: installedUnitBinaryPath,
-		unitRunning:             unitRunning,
-		stopUnit:                stopUserUnit,
-		startUnit:               startUserUnit,
-		restartTrayUnit:         restartTrayUnit,
-		verifyRunningBinary:     verifyRunningBinary,
-		queryBinaryVersion:      queryBinaryVersionExec,
+		out:                 os.Stdout,
+		httpClient:          defaultReleaseHTTPClient(),
+		releaseAPIURL:       defaultLatestReleaseURL,
+		enforceReleaseHosts: true,
+		currentVersion:      version,
+		defaultInstallDir:   defaultInstallDir,
+		installedUnitConfig: installedUnitConfigForHome,
+		unitRunning:         unitRunning,
+		stopUnit:            stopUserUnit,
+		startUnit:           startUserUnit,
+		restartTrayUnit:     restartTrayUnit,
+		verifyRunningBinary: verifyRunningBinary,
+		queryBinaryVersion:  queryBinaryVersionExec,
 	}
 }
 
@@ -95,6 +100,12 @@ func updateCommand(ctx context.Context, home string, args []string, d updateDeps
 	if *jsonOut && !*checkOnly {
 		return newUserError("companion update: --json is only valid with --check", nil)
 	}
+	stateDirExplicit := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "state-dir" {
+			stateDirExplicit = true
+		}
+	})
 
 	rel, err := fetchLatestRelease(ctx, d.httpClient, d.releaseAPIURL, d.enforceReleaseHosts)
 	if err != nil {
@@ -203,6 +214,7 @@ func updateCommand(ctx context.Context, home string, args []string, d updateDeps
 		installDir:         targetInstallDir,
 		installDirExplicit: installDirExplicit,
 		stateDir:           *stateDir,
+		stateDirExplicit:   stateDirExplicit,
 		force:              *force,
 		targetVersion:      rel.TagName,
 	}, d)
@@ -213,6 +225,7 @@ type upgradeOptions struct {
 	installDir         string
 	installDirExplicit bool
 	stateDir           string
+	stateDirExplicit   bool
 	force              bool
 	targetVersion      string // optional override when already known; otherwise queried from staged binary
 }
@@ -235,6 +248,12 @@ func upgradeFromCommand(ctx context.Context, home string, args []string, d updat
 	if flags.NArg() != 1 {
 		return newUserError("companion upgrade-from: staged directory path required", nil)
 	}
+	stateDirExplicit := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "state-dir" {
+			stateDirExplicit = true
+		}
+	})
 	dir := *installDir
 	explicit := dir != ""
 	if dir == "" {
@@ -245,6 +264,7 @@ func upgradeFromCommand(ctx context.Context, home string, args []string, d updat
 		installDir:         dir,
 		installDirExplicit: explicit,
 		stateDir:           *stateDir,
+		stateDirExplicit:   stateDirExplicit,
 		force:              *force,
 	}, d)
 }
@@ -284,13 +304,21 @@ func runUpgradeFrom(ctx context.Context, home string, opts upgradeOptions, d upd
 	if err != nil {
 		return err
 	}
-	if d.installedUnitBinaryPath != nil {
-		unitBin, hasUnit, err := d.installedUnitBinaryPath(home)
+	stateTarget := opts.stateDir
+	if stateTarget == "" {
+		stateTarget = filepath.Join(home, ".local/share/souls-house-companion")
+	}
+	absStateDir, err := filepath.Abs(stateTarget)
+	if err != nil {
+		return err
+	}
+	if d.installedUnitConfig != nil {
+		unitCfg, hasUnit, err := d.installedUnitConfig(home)
 		if err != nil {
 			return newUserError("companion upgrade: could not inspect existing service unit ExecStart", err)
 		}
 		if hasUnit {
-			unitDir := filepath.Clean(filepath.Dir(unitBin))
+			unitDir := filepath.Clean(filepath.Dir(unitCfg.binaryPath))
 			if opts.installDirExplicit && filepath.Clean(installDir) != unitDir {
 				return newUserError(
 					fmt.Sprintf("companion upgrade: --install-dir (%s) disagrees with installed service unit directory (%s)", installDir, unitDir),
@@ -300,11 +328,19 @@ func runUpgradeFrom(ctx context.Context, home string, opts upgradeOptions, d upd
 			if !opts.installDirExplicit {
 				installDir = unitDir
 			}
+			if unitCfg.stateDir != "" {
+				unitStateDir := filepath.Clean(unitCfg.stateDir)
+				if opts.stateDirExplicit && filepath.Clean(absStateDir) != unitStateDir {
+					return newUserError(
+						fmt.Sprintf("companion upgrade: --state-dir (%s) disagrees with installed service unit state directory (%s)", absStateDir, unitStateDir),
+						nil,
+					)
+				}
+				if !opts.stateDirExplicit {
+					absStateDir = unitStateDir
+				}
+			}
 		}
-	}
-	absStateDir, err := filepath.Abs(opts.stateDir)
-	if err != nil {
-		return err
 	}
 
 	// Serialize all local upgrades targeting installDir before inspecting the
@@ -422,6 +458,11 @@ func runUpgradeFrom(ctx context.Context, home string, opts upgradeOptions, d upd
 			var rbRestoreErr, rbStartErr, rbVerifyErr error
 			if backedUpCompanion {
 				rbRestoreErr = restoreFromPrevious(destCompanion)
+			} else if !hadInstalled {
+				rbRestoreErr = os.Remove(destCompanion)
+				if os.IsNotExist(rbRestoreErr) {
+					rbRestoreErr = nil
+				}
 			}
 			if rbRestoreErr == nil && companionWasRunning && !isDevicePaused(absStateDir) {
 				rbStartErr = d.startUnit(unit)

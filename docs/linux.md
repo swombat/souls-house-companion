@@ -102,8 +102,12 @@ only **Stop allowing commands**.
 (StatusNotifierItem). The circle is filled while the companion runs, a coral
 ring while it is paused, and grey when the companion isn't answering. Its menu
 lets you pause or resume the companion and toggle Run commands; every change
-goes through `souls-house-companion`. Run `souls-house-tray install` or
-`souls-house-tray uninstall` to manage the tray unit on its own.
+goes through `souls-house-companion`. Tray-triggered updates run outside the
+tray service via `systemd-run --user` so restarting the tray cannot interrupt
+the upgrade; if the tray's two-minute wait times out it shows "Could not
+update", though the background update may still finish. Run
+`souls-house-tray install` or `souls-house-tray uninstall` to manage the tray
+unit on its own.
 
 Source, licence and the full boundary description:
 https://github.com/swombat/souls-house-companion

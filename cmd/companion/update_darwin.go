@@ -17,8 +17,8 @@ func releaseAssetName(ver string) (string, error) {
 }
 
 func restartTrayUnit(_ context.Context) error { return nil }
-func installedUnitBinaryPath(_ string) (string, bool, error) {
-	return "", false, nil
+func installedUnitConfigForHome(_ string) (installedUnitConfig, bool, error) {
+	return installedUnitConfig{}, false, nil
 }
 
 func verifyRunningBinary(ctx context.Context, _ string) error {

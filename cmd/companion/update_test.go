@@ -446,21 +446,26 @@ func TestUpgradeFromEngine(t *testing.T) {
 		home := t.TempDir()
 		customDir := filepath.Join(home, "custom-bin")
 		otherDir := filepath.Join(home, "other-bin")
-		stateDir := filepath.Join(home, "state")
+		customState := filepath.Join(home, "custom-state")
+		otherState := filepath.Join(home, "other-state")
 		_ = os.MkdirAll(customDir, 0755)
+		_ = os.MkdirAll(customState, 0700)
+		_ = client.Save(customState, client.State{DeviceID: "d-custom", Credential: "c", Paused: true})
+		_ = os.WriteFile(filepath.Join(customState, "paused"), nil, 0600)
 		customBin := filepath.Join(customDir, "souls-house-companion")
 		_ = os.WriteFile(customBin, []byte("old-custom"), 0755)
 		stage := setupStage(t, "new-v0.5.0")
 
+		started := false
 		deps := updateDeps{
 			out:               &bytes.Buffer{},
 			defaultInstallDir: func(string) string { return filepath.Join(home, ".local", "bin") },
-			installedUnitBinaryPath: func(string) (string, bool, error) {
-				return customBin, true, nil
+			installedUnitConfig: func(string) (installedUnitConfig, bool, error) {
+				return installedUnitConfig{binaryPath: customBin, stateDir: customState}, true, nil
 			},
-			unitRunning:         func(context.Context) (bool, error) { return false, nil },
+			unitRunning:         func(context.Context) (bool, error) { return true, nil },
 			stopUnit:            func(context.Context) error { return nil },
-			startUnit:           func(string) error { return nil },
+			startUnit:           func(string) error { started = true; return nil },
 			restartTrayUnit:     func(context.Context) error { return nil },
 			verifyRunningBinary: func(context.Context, string) error { return nil },
 			queryBinaryVersion: func(_ context.Context, p string) (string, error) {
@@ -476,16 +481,25 @@ func TestUpgradeFromEngine(t *testing.T) {
 			stagedDir:          stage,
 			installDir:         otherDir,
 			installDirExplicit: true,
-			stateDir:           stateDir,
 		}, deps)
 		if err == nil || !strings.Contains(formatDiagnostic(err), "disagrees with installed service unit") {
 			t.Fatalf("expected install-dir mismatch refusal, got %v", err)
 		}
 
-		// Omitting --install-dir automatically targets the unit's ExecStart directory.
+		// Explicit --state-dir disagreeing with unit's ExecStart --state-dir is refused.
+		err = runUpgradeFrom(context.Background(), home, upgradeOptions{
+			stagedDir:        stage,
+			stateDir:         otherState,
+			stateDirExplicit: true,
+		}, deps)
+		if err == nil || !strings.Contains(formatDiagnostic(err), "--state-dir") || !strings.Contains(formatDiagnostic(err), "disagrees with installed service unit") {
+			t.Fatalf("expected state-dir mismatch refusal, got %v", err)
+		}
+
+		// Omitting both flags automatically targets the unit's ExecStart directory
+		// and respects Pause in the unit's custom state directory.
 		if err := runUpgradeFrom(context.Background(), home, upgradeOptions{
 			stagedDir: stage,
-			stateDir:  stateDir,
 		}, deps); err != nil {
 			t.Fatalf("upgrade using unit ExecStart dir failed: %v", err)
 		}
@@ -494,6 +508,46 @@ func TestUpgradeFromEngine(t *testing.T) {
 		}
 		if prev, _ := os.ReadFile(customBin + ".previous"); string(prev) != "old-custom" {
 			t.Fatalf("custom .previous missing: %q", prev)
+		}
+		if started {
+			t.Fatal("unit paused in custom state-dir must not be started")
+		}
+	})
+
+	t.Run("fresh_install_tray_failure_removes_partial_companion", func(t *testing.T) {
+		home := t.TempDir()
+		installDir := filepath.Join(home, "bin")
+		stateDir := filepath.Join(home, "state")
+		stage := setupStage(t, "new-v0.5.0")
+		// Make staged tray unreadable so copying the tray fails after the fresh
+		// companion binary has already been copied into installDir.
+		stagedTray := filepath.Join(stage, "souls-house-tray")
+		if err := os.WriteFile(stagedTray, []byte("tray-v0.5.0"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(stagedTray, 0000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(stagedTray, 0755) })
+
+		deps := updateDeps{
+			out:               &bytes.Buffer{},
+			defaultInstallDir: func(string) string { return installDir },
+			unitRunning:       func(context.Context) (bool, error) { return false, nil },
+			queryBinaryVersion: func(_ context.Context, _ string) (string, error) {
+				return "v0.5.0", nil
+			},
+		}
+		err := runUpgradeFrom(context.Background(), home, upgradeOptions{
+			stagedDir:  stage,
+			installDir: installDir,
+			stateDir:   stateDir,
+		}, deps)
+		if err == nil || !strings.Contains(formatDiagnostic(err), "rolled back") {
+			t.Fatalf("expected rolled back error on fresh tray copy failure, got %v", err)
+		}
+		if _, statErr := os.Lstat(filepath.Join(installDir, "souls-house-companion")); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("fresh install companion should be removed on tray failure rollback, got err=%v", statErr)
 		}
 	})
 }
