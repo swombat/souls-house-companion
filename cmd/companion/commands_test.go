@@ -161,6 +161,52 @@ func TestCommandsFailedRestartReloadsStateAndRestoresPaused(t *testing.T) {
 	}
 }
 
+func TestCommandsFailedRestartUnconfirmedPauseDiagnostic(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "state")
+	if err := client.Save(dir, client.State{
+		URL:        "https://souls.house",
+		DeviceID:   "dev1",
+		Credential: "shcd_before",
+		Ceiling:    pairedCeiling(),
+		Paused:     false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deps := commandsDeps{
+		out:         &bytes.Buffer{},
+		unitRunning: func(context.Context) (bool, error) { return true, nil },
+		stopUnit:    func(context.Context) error { return nil },
+		startUnit: func(string) error {
+			// Force both pause signals to fail during rollback:
+			// 1. paused marker path is a directory -> OpenFile fails.
+			// 2. state lock is held -> client.Lock fails.
+			if err := os.Mkdir(filepath.Join(dir, "paused"), 0700); err != nil {
+				return err
+			}
+			held, err := client.Lock(dir)
+			if err != nil {
+				return err
+			}
+			t.Cleanup(func() { held.Close() })
+			return errors.New("start failed")
+		},
+		now: time.Now,
+	}
+	err := commandsCommand(context.Background(), home, []string{"on", "--state-dir", dir}, deps)
+	if err == nil {
+		t.Fatal("expected error when restart fails")
+	}
+	msg := formatDiagnostic(err)
+	if !strings.Contains(msg, "pause could not be confirmed") {
+		t.Fatalf("expected unconfirmed-pause diagnostic, got %q", msg)
+	}
+	if strings.Contains(msg, "is now paused") {
+		t.Fatalf("diagnostic must not claim computer is paused when both signals failed: %q", msg)
+	}
+}
+
 func TestCommandsOnRefusesEmptyResidentsAndUninstalled(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, "state")

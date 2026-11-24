@@ -189,7 +189,9 @@ func commandsCommand(ctx context.Context, home string, args []string, d commands
 			marker, mErr := os.OpenFile(filepath.Join(absDir, "paused"), os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
 			if mErr == nil {
 				mErr = marker.Sync()
-				marker.Close()
+				if closeErr := marker.Close(); mErr == nil {
+					mErr = closeErr
+				}
 			}
 			var saveErr error
 			if reLock, lockErr := client.Lock(absDir); lockErr == nil {
@@ -203,10 +205,11 @@ func commandsCommand(ctx context.Context, home string, args []string, d commands
 			} else {
 				saveErr = lockErr
 			}
-			return newUserError(
-				"companion commands: failed to restart the service; this computer is now paused; run 'souls-house-companion resume'",
-				errors.Join(err, mErr, saveErr),
-			)
+			msg := "companion commands: failed to restart the service and pause could not be confirmed; check 'souls-house-companion status' and service status"
+			if mErr == nil || saveErr == nil {
+				msg = "companion commands: failed to restart the service; this computer is now paused; run 'souls-house-companion resume'"
+			}
+			return newUserError(msg, errors.Join(err, mErr, saveErr))
 		}
 		return nil
 	}
