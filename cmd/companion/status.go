@@ -10,9 +10,10 @@ import (
 	"github.com/swombat/souls-house-companion/internal/client"
 	"github.com/swombat/souls-house-companion/internal/policy"
 	"github.com/swombat/souls-house-companion/internal/runner"
+	"github.com/swombat/souls-house-companion/internal/volumes"
 )
 
-func writeHumanStatus(w io.Writer, state client.State, paused bool, serviceState string) error {
+func writeHumanStatus(w io.Writer, state client.State, paused bool, serviceState string, mounts []volumes.Mount, mountsKnown bool) error {
 	var statusLabel string
 	switch {
 	case state.Uninstalled:
@@ -59,12 +60,12 @@ func writeHumanStatus(w io.Writer, state client.State, paused bool, serviceState
 	if _, err := fmt.Fprintln(w, cmdLine); err != nil {
 		return err
 	}
-	volumesSummary := summarizeCeilingVolumes(state.Ceiling)
+	volumesSummary := summarizeCeilingVolumes(state.Ceiling, mounts, mountsKnown)
 	_, err := fmt.Fprintf(w, "Volumes: %s\n", volumesSummary)
 	return err
 }
 
-func summarizeCeilingVolumes(p policy.Policy) string {
+func summarizeCeilingVolumes(p policy.Policy, mounts []volumes.Mount, mountsKnown bool) string {
 	accessByVol := make(map[string]policy.Access)
 	for _, r := range p.Residents {
 		for _, g := range r.Volumes {
@@ -76,18 +77,62 @@ func summarizeCeilingVolumes(p policy.Policy) string {
 	if len(accessByVol) == 0 {
 		return "none"
 	}
-	keys := make([]string, 0, len(accessByVol))
-	for k := range accessByVol {
-		keys = append(keys, k)
+	mountByKey := make(map[string]string, len(mounts))
+	for _, m := range mounts {
+		if m.Key == "" || m.Denied != "" || m.Mountpoint == "" {
+			continue
+		}
+		if _, exists := mountByKey[m.Key]; !exists {
+			mountByKey[m.Key] = m.Mountpoint
+		}
 	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, k := range keys {
+	type entry struct {
+		mounted bool
+		label   string
+		key     string
+		text    string
+	}
+	entries := make([]entry, 0, len(accessByVol))
+	for k, access := range accessByVol {
 		mode := "read"
-		if accessByVol[k] == policy.Write {
+		if access == policy.Write {
 			mode = "read/write"
 		}
-		parts = append(parts, fmt.Sprintf("%s (%s)", k, mode))
+		if mp, ok := mountByKey[k]; ok {
+			entries = append(entries, entry{
+				mounted: true,
+				label:   mp,
+				key:     k,
+				text:    fmt.Sprintf("%s (%s)", mp, mode),
+			})
+		} else if mountsKnown {
+			entries = append(entries, entry{
+				mounted: false,
+				label:   k,
+				key:     k,
+				text:    fmt.Sprintf("%s (%s, not mounted)", k, mode),
+			})
+		} else {
+			entries = append(entries, entry{
+				mounted: false,
+				label:   k,
+				key:     k,
+				text:    fmt.Sprintf("%s (%s)", k, mode),
+			})
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].mounted != entries[j].mounted {
+			return entries[i].mounted
+		}
+		if entries[i].label != entries[j].label {
+			return entries[i].label < entries[j].label
+		}
+		return entries[i].key < entries[j].key
+	})
+	parts := make([]string, len(entries))
+	for i, e := range entries {
+		parts[i] = e.text
 	}
 	return strings.Join(parts, ", ")
 }

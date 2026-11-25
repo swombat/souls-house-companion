@@ -608,8 +608,11 @@ func TestStatusHumanAndJSON(t *testing.T) {
 	}
 
 	// Human summary unit checks.
+	discovered := []volumes.Mount{
+		{Key: "vol-root", Mountpoint: "/", Filesystem: "ext4"},
+	}
 	var buf bytes.Buffer
-	if err := writeHumanStatus(&buf, state, false, "running"); err != nil {
+	if err := writeHumanStatus(&buf, state, false, "running", discovered, true); err != nil {
 		t.Fatal(err)
 	}
 	got := buf.String()
@@ -618,11 +621,14 @@ func TestStatusHumanAndJSON(t *testing.T) {
 		"House: https://souls.house",
 		"Device ID: dev-abc",
 		"Run commands:",
-		"Volumes: vol-root (read/write)",
+		"Volumes: / (read/write)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("human status missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "vol-root") {
+		t.Fatalf("human status leaked raw volume key for mounted volume:\n%s", got)
 	}
 	if strings.Contains(got, "shcd_super_secret") {
 		t.Fatalf("human status leaked credential:\n%s", got)
@@ -630,7 +636,7 @@ func TestStatusHumanAndJSON(t *testing.T) {
 
 	// Unreachable service manager must report unknown service state, never "active".
 	var unknownBuf bytes.Buffer
-	if err := writeHumanStatus(&unknownBuf, state, false, ""); err != nil {
+	if err := writeHumanStatus(&unknownBuf, state, false, "", discovered, true); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(unknownBuf.String(), "Status: service state unknown (not paused)") {
@@ -641,7 +647,7 @@ func TestStatusHumanAndJSON(t *testing.T) {
 	}
 
 	var stoppedBuf bytes.Buffer
-	if err := writeHumanStatus(&stoppedBuf, state, false, "stopped"); err != nil {
+	if err := writeHumanStatus(&stoppedBuf, state, false, "stopped", discovered, true); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(stoppedBuf.String(), "Status: stopped (not paused)") {
@@ -649,7 +655,7 @@ func TestStatusHumanAndJSON(t *testing.T) {
 	}
 
 	var pausedBuf bytes.Buffer
-	if err := writeHumanStatus(&pausedBuf, state, true, "stopped"); err != nil {
+	if err := writeHumanStatus(&pausedBuf, state, true, "stopped", discovered, true); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(pausedBuf.String(), "Status: paused") {
@@ -659,7 +665,7 @@ func TestStatusHumanAndJSON(t *testing.T) {
 	uninstalledState := state
 	uninstalledState.Uninstalled = true
 	var uninstalledBuf bytes.Buffer
-	if err := writeHumanStatus(&uninstalledBuf, uninstalledState, true, "stopped"); err != nil {
+	if err := writeHumanStatus(&uninstalledBuf, uninstalledState, true, "stopped", nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(uninstalledBuf.String(), "Status: uninstalled") {
@@ -706,6 +712,65 @@ func TestStatusHumanAndJSON(t *testing.T) {
 	}
 	if strings.Contains(jsonOut, "shcd_super_secret") {
 		t.Fatalf("status --json leaked credential:\n%s", jsonOut)
+	}
+}
+
+func TestHumanStatusVolumes(t *testing.T) {
+	state := client.State{
+		URL:      "https://souls.house",
+		DeviceID: "dev-vol",
+		Ceiling: policy.Policy{
+			Residents: []policy.Resident{
+				{
+					ID: "res-1",
+					Volumes: []policy.Grant{
+						{Volume: "linux-volume:aaa111", Access: policy.Read},
+						{Volume: "linux-volume:bbb222", Access: policy.Write},
+					},
+				},
+			},
+		},
+	}
+
+	mounts := []volumes.Mount{
+		{Key: "linux-volume:aaa111", Mountpoint: "/", Filesystem: "ext4"},
+		{Key: "linux-volume:bbb222", Mountpoint: "/mnt/denied", Denied: "unsupported filesystem"},
+	}
+
+	var buf bytes.Buffer
+	if err := writeHumanStatus(&buf, state, false, "running", mounts, true); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	wantLine := "Volumes: / (read), linux-volume:bbb222 (read/write, not mounted)\n"
+	if !strings.Contains(got, wantLine) {
+		t.Fatalf("expected %q in human status, got:\n%s", wantLine, got)
+	}
+	if strings.Contains(got, "linux-volume:aaa111") {
+		t.Fatalf("mounted volume should print mountpoint, not raw key:\n%s", got)
+	}
+	if strings.Contains(got, "/mnt/denied") {
+		t.Fatalf("denied mount must not be shown as mounted:\n%s", got)
+	}
+
+	// When mount discovery fails, fall back to keys without claiming "not mounted".
+	var errBuf bytes.Buffer
+	if err := writeHumanStatus(&errBuf, state, false, "running", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	wantFallback := "Volumes: linux-volume:aaa111 (read), linux-volume:bbb222 (read/write)\n"
+	if !strings.Contains(errBuf.String(), wantFallback) {
+		t.Fatalf("expected %q when mounts unavailable, got:\n%s", wantFallback, errBuf.String())
+	}
+
+	// Empty ceiling prints none.
+	emptyState := client.State{URL: "https://souls.house", DeviceID: "dev-empty"}
+	var emptyBuf bytes.Buffer
+	if err := writeHumanStatus(&emptyBuf, emptyState, false, "running", mounts, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(emptyBuf.String(), "Volumes: none\n") {
+		t.Fatalf("expected Volumes: none, got:\n%s", emptyBuf.String())
 	}
 }
 

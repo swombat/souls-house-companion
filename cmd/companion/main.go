@@ -343,7 +343,16 @@ func run(args []string) error {
 			addPlatformStatus(localStatus)
 			return json.NewEncoder(os.Stdout).Encode(localStatus)
 		}
-		return writeHumanStatus(os.Stdout, state, paused, platformServiceSummary())
+		var mounts []volumes.Mount
+		var mountsKnown bool
+		if !state.Uninstalled {
+			if discovered, snap, mountErr := volumes.LoadSystem(); mountErr == nil {
+				mounts = discovered
+				mountsKnown = true
+				snap.Close()
+			}
+		}
+		return writeHumanStatus(os.Stdout, state, paused, platformServiceSummary(), mounts, mountsKnown)
 	case "policy":
 		state, err := client.Load(*dir)
 		if err != nil {
