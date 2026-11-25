@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -41,27 +44,70 @@ func TestLinuxVerifyRunningBinaryWithProc(t *testing.T) {
 
 	// 1. Matching exe symlink succeeds (no network needed; offline house is fine).
 	_ = os.Symlink(newBin, exeLink)
-	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("active", 12345), 50*time.Millisecond); err != nil {
+	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("active", 12345), 50*time.Millisecond, 40*time.Millisecond); err != nil {
 		t.Fatalf("expected matching exe to succeed, got %v", err)
 	}
 
 	// 2. Exe symlink pointing to a different binary fails.
 	_ = os.Remove(exeLink)
 	_ = os.Symlink(otherBin, exeLink)
-	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("active", 12345), 50*time.Millisecond); err == nil {
+	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("active", 12345), 50*time.Millisecond, 40*time.Millisecond); err == nil {
 		t.Fatal("expected mismatched exe to fail")
 	}
 
 	// 3. Exe symlink ending in " (deleted)" (stale daemon still serving) fails.
 	_ = os.Remove(exeLink)
 	_ = os.Symlink(newBin+" (deleted)", exeLink)
-	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("active", 12345), 50*time.Millisecond); err == nil {
+	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("active", 12345), 50*time.Millisecond, 40*time.Millisecond); err == nil {
 		t.Fatal("expected deleted exe symlink to fail")
 	}
 
 	// 4. Failed systemd state fails immediately.
-	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("failed", 0), 50*time.Millisecond); err == nil {
+	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, activeQuery("failed", 0), 50*time.Millisecond, 40*time.Millisecond); err == nil {
 		t.Fatal("expected failed unit state to fail")
+	}
+
+	// 5. Process exiting during settle period fails even if first sighting matched.
+	_ = os.Remove(exeLink)
+	_ = os.Symlink(newBin, exeLink)
+	calls := 0
+	dyingQuery := func(context.Context, string) (string, int, error) {
+		calls++
+		if calls == 2 {
+			_ = os.Remove(exeLink)
+		}
+		return "active", 12345, nil
+	}
+	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, dyingQuery, 50*time.Millisecond, 80*time.Millisecond); err == nil {
+		t.Fatal("expected process exiting during settle period to fail")
+	}
+
+	// 6. PID changing during settle period (auto-restart) fails.
+	_ = os.Remove(exeLink)
+	_ = os.Symlink(newBin, exeLink)
+	calls = 0
+	restartingQuery := func(context.Context, string) (string, int, error) {
+		calls++
+		if calls == 1 {
+			return "active", 12345, nil
+		}
+		return "active", 12346, nil
+	}
+	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, restartingQuery, 50*time.Millisecond, 80*time.Millisecond); err == nil {
+		t.Fatal("expected PID change during settle period to fail")
+	}
+
+	// 7. Unit leaving active state during settle period fails.
+	calls = 0
+	deactivatingQuery := func(context.Context, string) (string, int, error) {
+		calls++
+		if calls == 1 {
+			return "active", 12345, nil
+		}
+		return "activating", 12345, nil
+	}
+	if err := verifyRunningBinaryWithProc(context.Background(), newBin, procRoot, deactivatingQuery, 50*time.Millisecond, 80*time.Millisecond); err == nil {
+		t.Fatal("expected unit leaving active state during settle period to fail")
 	}
 }
 
@@ -214,6 +260,17 @@ func TestLinuxInstallScriptLegacyAae878cUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create the systemd user unit file that serve protects via linuxfs.CaptureProtected
+	// so the upgraded serve process stays alive against the offline house URL.
+	unitPath := userUnitPath(home)
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	unitContent := fmt.Sprintf("[Service]\nExecStart=%q serve --state-dir %q\n", legacyBin, stateDir)
+	if err := os.WriteFile(unitPath, []byte(unitContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
 	// Fake systemctl that starts as active, stops cleanly, and on `start` spawns
 	// the newly installed companion binary (`serve --state-dir ...`) so /proc/<pid>/exe
 	// matches the real upgraded binary even though the house is offline.
@@ -325,6 +382,26 @@ exit 0
 	trayIdx := strings.Index(logStr, "try-restart --no-block souls-house-tray.service")
 	if startIdx < 0 || trayIdx < 0 || trayIdx < startIdx {
 		t.Fatalf("expected tray try-restart --no-block after companion start; systemctl log:\n%s", logStr)
+	}
+
+	// The upgraded serve process must still be alive on the upgraded binary at the end.
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read pidFile: %v", err)
+	}
+	runningPID, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil || runningPID <= 0 || runningPID == os.Getpid() {
+		t.Fatalf("invalid running PID in pidFile: %q (err=%v)", pidBytes, err)
+	}
+	if err := syscall.Kill(runningPID, 0); err != nil {
+		t.Fatalf("upgraded serve process (pid %d) is no longer running: %v", runningPID, err)
+	}
+	upgradedInfo, err := os.Stat(legacyBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyProcExe("/proc", runningPID, upgradedInfo); err != nil {
+		t.Fatalf("upgraded serve process (pid %d) exe mismatch: %v", runningPID, err)
 	}
 }
 
@@ -494,4 +571,187 @@ exit 0
 			t.Fatalf("paused custom-state unit must not be stopped or started; systemctl log:\n%s", logs)
 		}
 	})
+}
+
+// buildTinyCompanionBinary compiles a small real ELF binary for upgrade/rollback
+// tests so /proc/<pid>/exe points at the exact installed file (not /bin/sh).
+func buildTinyCompanionBinary(t *testing.T, outPath, ver string, exitAfter time.Duration) {
+	t.Helper()
+	srcDir := t.TempDir()
+	var serveBody string
+	if exitAfter > 0 {
+		serveBody = fmt.Sprintf("time.Sleep(%d * time.Millisecond)\n\t\tos.Exit(1)", exitAfter.Milliseconds())
+	} else {
+		serveBody = "for {\n\t\t\ttime.Sleep(time.Second)\n\t\t}"
+	}
+	src := fmt.Sprintf(`package main
+
+import (
+	"fmt"
+	"os"
+	"time"
+)
+
+func main() {
+	_ = time.Second
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Println(%q)
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "serve" {
+		%s
+	}
+	os.Exit(2)
+}
+`, ver, serveBody)
+	srcFile := filepath.Join(srcDir, "main.go")
+	if err := os.WriteFile(srcFile, []byte(src), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "build", "-o", outPath, srcFile)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build tiny binary %s: %v\n%s", ver, err, out)
+	}
+}
+
+// TestLinuxUpgradeRollbackOnEarlyCrash verifies that when a newly upgraded
+// companion binary starts and crashes 50ms later, verifyRunningBinary catches
+// the crash during its settle window, rolls back to the working previous
+// binary, restarts it, and confirms the restored binary stays running.
+func TestLinuxUpgradeRollbackOnEarlyCrash(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping early-crash rollback test in short mode")
+	}
+	home := t.TempDir()
+	installDir := filepath.Join(home, ".local", "bin")
+	stateDir := filepath.Join(home, ".local", "share", "souls-house-companion")
+	stagingDir := t.TempDir()
+	if err := os.MkdirAll(installDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	destCompanion := filepath.Join(installDir, "souls-house-companion")
+	stagedCompanion := filepath.Join(stagingDir, "souls-house-companion")
+	buildTinyCompanionBinary(t, destCompanion, "v0.4.4", 0)
+	buildTinyCompanionBinary(t, stagedCompanion, "v0.9.0", 50*time.Millisecond)
+
+	var mu sync.Mutex
+	var activeState = "inactive"
+	var currentCmd *exec.Cmd
+	var currentPID int
+	var waitDone chan struct{}
+
+	stopProc := func() {
+		mu.Lock()
+		cmd := currentCmd
+		done := waitDone
+		currentCmd = nil
+		currentPID = 0
+		activeState = "inactive"
+		mu.Unlock()
+		if cmd != nil && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			<-done
+		}
+	}
+	startProc := func() error {
+		stopProc()
+		cmd := exec.Command(destCompanion, "serve", "--state-dir", stateDir)
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		done := make(chan struct{})
+		pid := cmd.Process.Pid
+		mu.Lock()
+		currentCmd = cmd
+		currentPID = pid
+		activeState = "active"
+		waitDone = done
+		mu.Unlock()
+		go func() {
+			_ = cmd.Wait()
+			close(done)
+			// Intentionally leave activeState="active" and currentPID set
+			// (simulating systemd before it notices or while RestartSec ticks)
+			// to prove /proc/<pid>/exe during settle catches the dead process.
+		}()
+		return nil
+	}
+	t.Cleanup(stopProc)
+
+	// Start the working v0.4.4 binary before upgrading.
+	if err := startProc(); err != nil {
+		t.Fatalf("start old binary: %v", err)
+	}
+
+	query := func(context.Context, string) (string, int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return activeState, currentPID, nil
+	}
+
+	var out bytes.Buffer
+	t.Setenv("HOME", home)
+	d := updateDeps{
+		out:               &out,
+		defaultInstallDir: defaultInstallDir,
+		unitRunning: func(context.Context) (bool, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return activeState == "active" && currentPID > 0, nil
+		},
+		stopUnit: func(context.Context) error {
+			stopProc()
+			return nil
+		},
+		startUnit: func(string) error {
+			return startProc()
+		},
+		verifyRunningBinary: func(ctx context.Context, expectedBin string) error {
+			return verifyRunningBinaryWithProc(ctx, expectedBin, "/proc", query, verifyStartTimeout, verifySettleDuration)
+		},
+		restartTrayUnit:     func(context.Context) error { return nil },
+		queryBinaryVersion:  queryBinaryVersionExec,
+		installedUnitConfig: func(string) (installedUnitConfig, bool, error) { return installedUnitConfig{}, false, nil },
+	}
+
+	err := runUpgradeFrom(context.Background(), home, upgradeOptions{
+		stagedDir:  stagingDir,
+		installDir: installDir,
+		stateDir:   stateDir,
+	}, d)
+	if err == nil {
+		t.Fatal("expected upgrade to crashing binary to fail and roll back")
+	}
+	diag := formatDiagnostic(err)
+	if !strings.Contains(diag, "rolled back") || strings.Contains(diag, "could not be confirmed") {
+		t.Fatalf("expected confirmed rollback diagnostic, got: %q (cause=%v)", diag, errors.Unwrap(err))
+	}
+
+	// Restored binary on disk must be v0.4.4.
+	gotVer, err := exec.Command(destCompanion, "version").Output()
+	if err != nil || strings.TrimSpace(string(gotVer)) != "v0.4.4" {
+		t.Fatalf("restored binary version = %q (err=%v), want v0.4.4", gotVer, err)
+	}
+
+	// Restored v0.4.4 process must still be running on the restored executable.
+	mu.Lock()
+	restoredPID := currentPID
+	mu.Unlock()
+	if restoredPID <= 0 {
+		t.Fatalf("expected restored process PID > 0, got %d", restoredPID)
+	}
+	if err := syscall.Kill(restoredPID, 0); err != nil {
+		t.Fatalf("restored v0.4.4 process (pid %d) is not running: %v", restoredPID, err)
+	}
+	restoredInfo, err := os.Stat(destCompanion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyProcExe("/proc", restoredPID, restoredInfo); err != nil {
+		t.Fatalf("restored process (pid %d) exe mismatch: %v", restoredPID, err)
+	}
 }

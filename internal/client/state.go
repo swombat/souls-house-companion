@@ -3,6 +3,7 @@ package client
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -13,6 +14,10 @@ import (
 
 // ErrLocked is returned by Lock when another companion process holds the state lock.
 var ErrLocked = errors.New("companion is already running")
+
+// ErrStateNotFound is returned by Load when the state directory or state.json
+// does not exist (this computer has not been paired yet).
+var ErrStateNotFound = errors.New("state file not found")
 
 // State is private; never print or log it. PendingSession is persisted before
 // credential exchange so a lost HTTP response can be retried with the same ID.
@@ -30,10 +35,16 @@ type State struct {
 func Load(dir string) (State, error) {
 	var state State
 	if err := privateDirectory(dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return state, fmt.Errorf("%w: %w", ErrStateNotFound, err)
+		}
 		return state, err
 	}
 	f, err := os.OpenFile(filepath.Join(dir, "state.json"), os.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return state, fmt.Errorf("%w: %w", ErrStateNotFound, err)
+		}
 		return state, err
 	}
 	defer f.Close()

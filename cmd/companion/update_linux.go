@@ -189,12 +189,40 @@ func queryUnitActiveAndPID(ctx context.Context, unitName string) (string, int, e
 	return active, pid, nil
 }
 
+const (
+	verifyStartTimeout   = 5 * time.Second
+	verifySettleDuration = 2 * time.Second
+)
+
+var errDeletedRunningBinary = errors.New("running service is still executing a deleted previous binary")
+
+func verifyProcExe(procRoot string, pid int, expectedInfo os.FileInfo) error {
+	exeLinkPath := filepath.Join(procRoot, strconv.Itoa(pid), "exe")
+	linkTarget, err := os.Readlink(exeLinkPath)
+	if err != nil {
+		return err
+	}
+	if strings.HasSuffix(linkTarget, " (deleted)") {
+		return errDeletedRunningBinary
+	}
+	procInfo, err := os.Stat(exeLinkPath)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(expectedInfo, procInfo) {
+		return errors.New("running service executable does not match upgraded binary")
+	}
+	return nil
+}
+
 // verifyRunningBinary confirms that the restarted systemd user service is
-// active and its MainPID is executing the newly installed binary on disk (not
-// a stale/deleted old process). This checks local systemd + /proc/<pid>/exe
-// only; an offline house does not cause a failed start.
+// active, its MainPID is executing the newly installed binary on disk (not
+// a stale/deleted old process), and the same PID stays alive on that binary
+// through a settle window so a process that crashes shortly after start
+// triggers rollback. This checks local systemd + /proc/<pid>/exe only; an
+// offline house does not cause a failed start.
 func verifyRunningBinary(ctx context.Context, expectedBin string) error {
-	return verifyRunningBinaryWithProc(ctx, expectedBin, "/proc", queryUnitActiveAndPID, 5*time.Second)
+	return verifyRunningBinaryWithProc(ctx, expectedBin, "/proc", queryUnitActiveAndPID, verifyStartTimeout, verifySettleDuration)
 }
 
 func verifyRunningBinaryWithProc(
@@ -203,6 +231,7 @@ func verifyRunningBinaryWithProc(
 	procRoot string,
 	query func(context.Context, string) (string, int, error),
 	timeout time.Duration,
+	settle time.Duration,
 ) error {
 	resolvedExpected, err := filepath.EvalSymlinks(expectedBin)
 	if err != nil {
@@ -214,6 +243,7 @@ func verifyRunningBinaryWithProc(
 	}
 	deadline := time.Now().Add(timeout)
 	var lastErr error
+	matchedPID := 0
 	for {
 		active, pid, err := query(ctx, companionUnit)
 		if err != nil {
@@ -221,22 +251,15 @@ func verifyRunningBinaryWithProc(
 		} else if active == "failed" || active == "inactive" {
 			return fmt.Errorf("service is %s after start", active)
 		} else if active == "active" && pid > 0 {
-			exeLinkPath := filepath.Join(procRoot, strconv.Itoa(pid), "exe")
-			linkTarget, linkErr := os.Readlink(exeLinkPath)
-			if linkErr != nil {
-				lastErr = linkErr
-			} else if strings.HasSuffix(linkTarget, " (deleted)") {
-				return errors.New("running service is still executing a deleted previous binary")
-			} else {
-				procInfo, statErr := os.Stat(exeLinkPath)
-				if statErr != nil {
-					lastErr = statErr
-				} else if os.SameFile(expectedInfo, procInfo) {
-					return nil
-				} else {
-					lastErr = errors.New("running service executable does not match upgraded binary")
-				}
+			exeErr := verifyProcExe(procRoot, pid, expectedInfo)
+			if exeErr == nil {
+				matchedPID = pid
+				break
 			}
+			if errors.Is(exeErr, errDeletedRunningBinary) {
+				return exeErr
+			}
+			lastErr = exeErr
 		} else {
 			lastErr = fmt.Errorf("service not active yet (state=%s pid=%d)", active, pid)
 		}
@@ -250,6 +273,41 @@ func verifyRunningBinaryWithProc(
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	if settle <= 0 {
+		return nil
+	}
+	settleDeadline := time.Now().Add(settle)
+	for {
+		remaining := time.Until(settleDeadline)
+		if remaining > 0 {
+			step := 100 * time.Millisecond
+			if remaining < step {
+				step = remaining
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(step):
+			}
+		}
+		active, pid, err := query(ctx, companionUnit)
+		if err != nil {
+			return err
+		}
+		if active != "active" {
+			return fmt.Errorf("service became %s during settle check", active)
+		}
+		if pid != matchedPID {
+			return fmt.Errorf("service PID changed during settle check (was %d, now %d)", matchedPID, pid)
+		}
+		if err := verifyProcExe(procRoot, matchedPID, expectedInfo); err != nil {
+			return err
+		}
+		if time.Until(settleDeadline) <= 0 {
+			return nil
 		}
 	}
 }

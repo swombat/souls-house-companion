@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"unicode"
 
@@ -56,7 +55,7 @@ func formatDiagnostic(err error) string {
 	if errors.Is(err, client.ErrLocked) {
 		return "companion: service is currently running; run 'souls-house-companion pause' first"
 	}
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, client.ErrStateNotFound) {
 		return "companion: not paired yet (state file not found); run 'souls-house-companion setup' to pair this computer"
 	}
 	if errors.Is(err, context.Canceled) {
