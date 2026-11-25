@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,8 +101,16 @@ func TestHelpTopicsAndDiagnostics(t *testing.T) {
 	if got := formatDiagnostic(client.ErrLocked); !strings.Contains(got, "pause") {
 		t.Fatalf("locked diagnostic should mention pause: %q", got)
 	}
-	if got := formatDiagnostic(os.ErrNotExist); !strings.Contains(got, "setup") {
-		t.Fatalf("not-exist diagnostic should mention setup: %q", got)
+	if got := formatDiagnostic(client.ErrStateNotFound); !strings.Contains(got, "not paired") || !strings.Contains(got, "setup") {
+		t.Fatalf("missing-state diagnostic should mention not paired and setup: %q", got)
+	}
+	if _, loadErr := client.Load(filepath.Join(t.TempDir(), "missing")); loadErr == nil {
+		t.Fatal("client.Load on missing dir succeeded")
+	} else if got := formatDiagnostic(loadErr); !strings.Contains(got, "not paired") || !strings.Contains(got, "setup") {
+		t.Fatalf("client.Load missing-state diagnostic should mention not paired and setup: %q", got)
+	}
+	if got := formatDiagnostic(fmt.Errorf("linuxfs: capture protected identity: %w", os.ErrNotExist)); strings.Contains(got, "not paired") {
+		t.Fatalf("non-state os.ErrNotExist must not claim not paired: %q", got)
 	}
 
 	// Opaque network/operation payload error must never be interpolated into stderr.
