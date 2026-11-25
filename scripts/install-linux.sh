@@ -107,6 +107,31 @@ download_file() {
   fi
 }
 
+dir_on_path() {
+  target="${1%/}"
+  [ -n "$target" ] || target="/"
+  rest="${PATH:-}"
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      *:*)
+        entry="${rest%%:*}"
+        rest="${rest#*:}"
+        ;;
+      *)
+        entry="$rest"
+        rest=""
+        ;;
+    esac
+    [ -n "$entry" ] || continue
+    entry="${entry%/}"
+    [ -n "$entry" ] || entry="/"
+    if [ "$entry" = "$target" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [ -z "$version" ]; then
   echo "install-linux.sh: --version is required when running an unstamped script" >&2
   exit 1
@@ -216,12 +241,17 @@ fi
 set -- "$@" "$staged_dir"
 "$staged_bin" "$@"
 
+ran_setup=0
 unit_file="${HOME}/.config/systemd/user/souls-house-companion.service"
 if [ "$no_setup" -eq 0 ] && [ ! -f "${state_dir}/state.json" ] && [ ! -e "$unit_file" ]; then
   if [ -t 0 ]; then
+    ran_setup=1
     "${install_dir}/souls-house-companion" setup --state-dir "$state_dir"
   else
     echo "Installed to ${install_dir}/souls-house-companion."
     echo "Run '${install_dir}/souls-house-companion setup' to pair this computer."
   fi
+fi
+if [ "$ran_setup" -eq 0 ] && [ -x "${install_dir}/souls-house-companion" ] && ! dir_on_path "$install_dir"; then
+  echo "Note: ${install_dir} is not on PATH; open a new terminal or log in again, or use ${install_dir}/souls-house-companion until then."
 fi

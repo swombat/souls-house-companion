@@ -571,6 +571,49 @@ exit 0
 			t.Fatalf("paused custom-state unit must not be stopped or started; systemctl log:\n%s", logs)
 		}
 	})
+
+	t.Run("path_note_when_install_dir_not_on_path", func(t *testing.T) {
+		srv, scriptPath := serveReleaseDir(t, distDir, ver, false)
+		home := t.TempDir()
+		installDir := filepath.Join(home, ".local", "bin")
+		stateDir := filepath.Join(home, ".local", "share", "souls-house-companion")
+
+		// Off PATH: installer prints the one-line PATH note.
+		cmdOff := exec.Command("sh", scriptPath,
+			"--install-dir", installDir,
+			"--state-dir", stateDir,
+			"--release-base-url", srv.URL,
+			"--no-setup",
+		)
+		cmdOff.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+		outOff, err := cmdOff.CombinedOutput()
+		if err != nil {
+			t.Fatalf("off-PATH install failed: %v\noutput:\n%s", err, outOff)
+		}
+		if !strings.Contains(string(outOff), installDir+" is not on PATH; open a new terminal or log in again") {
+			t.Fatalf("expected PATH note when install dir is off PATH, got:\n%s", outOff)
+		}
+		if !strings.Contains(string(outOff), filepath.Join(installDir, "souls-house-companion")) {
+			t.Fatalf("expected full binary path in PATH note, got:\n%s", outOff)
+		}
+
+		// On PATH (with --force reinstall): installer omits the PATH note.
+		cmdOn := exec.Command("sh", scriptPath,
+			"--install-dir", installDir,
+			"--state-dir", stateDir,
+			"--release-base-url", srv.URL,
+			"--no-setup",
+			"--force",
+		)
+		cmdOn.Env = []string{"HOME=" + home, "PATH=" + installDir + string(os.PathListSeparator) + os.Getenv("PATH")}
+		outOn, err := cmdOn.CombinedOutput()
+		if err != nil {
+			t.Fatalf("on-PATH install failed: %v\noutput:\n%s", err, outOn)
+		}
+		if strings.Contains(string(outOn), "is not on PATH") {
+			t.Fatalf("unexpected PATH note when install dir is on PATH:\n%s", outOn)
+		}
+	})
 }
 
 // buildTinyCompanionBinary compiles a small real ELF binary for upgrade/rollback

@@ -43,6 +43,8 @@ type setupDeps struct {
 	now         func() time.Time
 	sleep       func(context.Context, time.Duration) error
 	platform    setupPlatform
+	executable  func() (string, error)
+	pathEnv     func() string
 }
 
 func defaultSetupDeps(home string) setupDeps {
@@ -64,9 +66,46 @@ func defaultSetupDeps(home string) setupDeps {
 			snap.Close()
 			return mounts, nil
 		},
-		client:   client.New(nil),
-		platform: newSetupPlatform(),
+		client:     client.New(nil),
+		platform:   newSetupPlatform(),
+		executable: os.Executable,
+		pathEnv:    func() string { return os.Getenv("PATH") },
 	}
+}
+
+func dirOnPath(dir, pathEnv string) bool {
+	cleanDir := filepath.Clean(dir)
+	for _, entry := range filepath.SplitList(pathEnv) {
+		if entry == "" {
+			continue
+		}
+		if filepath.Clean(entry) == cleanDir {
+			return true
+		}
+	}
+	return false
+}
+
+func setupCommandRef(d setupDeps) (cmdRef, pathNote string) {
+	cmdRef = "souls-house-companion"
+	if d.executable == nil {
+		return cmdRef, ""
+	}
+	exe, err := d.executable()
+	if err != nil || exe == "" {
+		return cmdRef, ""
+	}
+	exeDir := filepath.Dir(exe)
+	pathVal := ""
+	if d.pathEnv != nil {
+		pathVal = d.pathEnv()
+	} else {
+		pathVal = os.Getenv("PATH")
+	}
+	if dirOnPath(exeDir, pathVal) {
+		return cmdRef, ""
+	}
+	return exe, fmt.Sprintf("Note: %s is not on PATH; open a new terminal or log in again, or use %s until then.", exeDir, exe)
 }
 
 func setupCommand(ctx context.Context, home string, args []string, d setupDeps) error {
@@ -269,11 +308,13 @@ func setupCommand(ctx context.Context, home string, args []string, d setupDeps) 
 	// Optional systemd lingering offer.
 	lingerNote := setupLinger(ctx, reader, d, *lingerMode, canPrompt)
 
+	cmdRef, pathNote := setupCommandRef(d)
+
 	fmt.Fprintln(d.out, "\nSetup complete:")
 	if serviceStarted {
 		fmt.Fprintln(d.out, "  - Companion service: installed and running")
 	} else {
-		fmt.Fprintln(d.out, "  - Companion service: installed and paused (run 'souls-house-companion resume' to start)")
+		fmt.Fprintf(d.out, "  - Companion service: installed and paused (run '%s resume' to start)\n", cmdRef)
 	}
 	if trayNote != "" {
 		fmt.Fprintf(d.out, "  - System tray: %s\n", trayNote)
@@ -281,7 +322,10 @@ func setupCommand(ctx context.Context, home string, args []string, d setupDeps) 
 	if lingerNote != "" {
 		fmt.Fprintf(d.out, "  - Background lingering: %s\n", lingerNote)
 	}
-	fmt.Fprintln(d.out, "  - Check status anytime with: souls-house-companion status")
+	fmt.Fprintf(d.out, "  - Check status anytime with: %s status\n", cmdRef)
+	if pathNote != "" {
+		fmt.Fprintf(d.out, "  - %s\n", pathNote)
+	}
 	return nil
 }
 

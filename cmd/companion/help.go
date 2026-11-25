@@ -151,7 +151,7 @@ Getting started:
   setup              Guided pairing, service installation, and optional tray setup
   commands on|off    Allow or disallow paired residents running local commands
   update             Check for or install a newer companion release
-  status             Show local pairing, pause state, and ceiling JSON
+  status             Show local pairing, pause state, and ceiling summary (--json for JSON)
   pause              Stop the companion and refuse all remote requests
   resume             Clear local pause and start the companion service
   uninstall --user   Revoke this device with the house and remove user services
@@ -235,7 +235,8 @@ Flags:
 
 const statusHelpText = `Usage: souls-house-companion status [--json] [--state-dir PATH]
 
-Print local companion status, version, pause state, and local ceiling as JSON.
+Print a short summary of local companion status, version, pause state, and local
+ceiling. Pass --json for machine-readable JSON output.
 `
 
 const pauseHelpText = `Usage: souls-house-companion pause [--state-dir PATH]

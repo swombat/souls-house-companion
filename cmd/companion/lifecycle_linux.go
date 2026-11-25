@@ -34,6 +34,18 @@ func (e *systemctlError) Unwrap() error { return e.cause }
 func idleBeforeServe(_ client.State, err error) (bool, error) { return false, err }
 
 func addPlatformStatus(_ map[string]any) {}
+func platformServiceSummary() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	running, err := unitRunning(ctx)
+	if err != nil {
+		return ""
+	}
+	if running {
+		return "running"
+	}
+	return "stopped"
+}
 func platformDiagnostic(err error) string {
 	var failure *systemctlError
 	if errors.As(err, &failure) {
@@ -206,29 +218,30 @@ func disableUserUnit(ctx context.Context, unitPath string) error {
 }
 
 // uninstallTrayUnit stops, disables, and removes the Linux tray unit if it is
-// installed. A missing tray unit file is a no-op (matching cmd/tray/unit.go).
-func uninstallTrayUnit(ctx context.Context, home string) error {
+// installed, returning the removed unit path. A missing tray unit file is a
+// no-op (matching cmd/tray/unit.go).
+func uninstallTrayUnit(ctx context.Context, home string) (string, error) {
 	path := trayUnitPath(home)
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
-		return nil
+		return "", nil
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !info.Mode().IsRegular() {
-		return errors.New("tray unit must be a regular file")
+		return "", errors.New("tray unit must be a regular file")
 	}
 	if err := stopUnit(ctx, trayUnit); err != nil {
-		return err
+		return "", err
 	}
 	if err := disableUnit(ctx, trayUnit, path); err != nil {
-		return err
+		return "", err
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
+		return "", err
 	}
-	return nil
+	return path, nil
 }
 func installUnit(path, dir string) error {
 	exe, err := os.Executable()

@@ -204,8 +204,33 @@ esac
 		t.Fatal(err)
 	}
 
-	if err := run([]string{"uninstall", "--user", "--state-dir", dir}); err != nil {
-		t.Fatalf("uninstall --user failed: %v", err)
+	origStdout := os.Stdout
+	rPipe, wPipe, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = wPipe
+	runErr := run([]string{"uninstall", "--user", "--state-dir", dir})
+	wPipe.Close()
+	os.Stdout = origStdout
+	var outBuf bytes.Buffer
+	_, _ = outBuf.ReadFrom(rPipe)
+	rPipe.Close()
+	if runErr != nil {
+		t.Fatalf("uninstall --user failed: %v", runErr)
+	}
+	outStr := outBuf.String()
+	for _, want := range []string{
+		"Uninstalled souls.house Companion:",
+		"Revoked this device with the house",
+		compUnit,
+		tUnit,
+		"Binaries left in:",
+		dir,
+	} {
+		if !strings.Contains(outStr, want) {
+			t.Fatalf("uninstall output missing %q:\n%s", want, outStr)
+		}
 	}
 	if _, err := os.Lstat(compUnit); !os.IsNotExist(err) {
 		t.Fatalf("companion unit not removed: %v", err)
@@ -230,7 +255,7 @@ esac
 	if err := os.Symlink(target, tUnit); err != nil {
 		t.Fatal(err)
 	}
-	if err := uninstallTrayUnit(context.Background(), home); err == nil {
+	if _, err := uninstallTrayUnit(context.Background(), home); err == nil {
 		t.Fatal("symlinked tray unit was accepted")
 	}
 	if data, err := os.ReadFile(target); err != nil || string(data) != "keep" {
