@@ -492,7 +492,7 @@ func TestSetupPathHint(t *testing.T) {
 	if !strings.Contains(offPath, "Check status anytime with: "+exe+" status\n") {
 		t.Fatalf("expected full path in status hint when off PATH, got:\n%s", offPath)
 	}
-	if !strings.Contains(offPath, "start with: "+exe+" resume)") {
+	if !strings.Contains(offPath, "Start the service with: "+exe+" resume\n") {
 		t.Fatalf("expected full path in resume hint when off PATH, got:\n%s", offPath)
 	}
 	if !strings.Contains(offPath, "/home/ada/.local/bin is not on PATH; open a new terminal or log in again") {
@@ -516,7 +516,7 @@ func TestSetupPathHint(t *testing.T) {
 	if !strings.Contains(spacedOut, wantStatus) {
 		t.Fatalf("expected shell-quoted status hint with --state-dir:\nwant: %q\ngot:\n%s", wantStatus, spacedOut)
 	}
-	wantResume := fmt.Sprintf("start with: '%s' resume --state-dir '%s')", spacedExe, spacedState)
+	wantResume := fmt.Sprintf("Start the service with: '%s' resume --state-dir '%s'\n", spacedExe, spacedState)
 	if !strings.Contains(spacedOut, wantResume) {
 		t.Fatalf("expected shell-quoted resume hint with --state-dir:\nwant: %q\ngot:\n%s", wantResume, spacedOut)
 	}

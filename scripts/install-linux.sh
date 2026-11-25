@@ -267,10 +267,10 @@ if [ "$no_setup" -eq 0 ] && [ ! -f "${state_dir}/state.json" ] && [ ! -e "$unit_
     if [ "$state_dir_explicit" -eq 1 ]; then
       setup_hint="${setup_hint} --state-dir $(shell_quote "$state_dir")"
     fi
-    echo "Installed to ${bin_path}."
-    echo "To pair this computer, run: ${setup_hint}"
+    printf '%s\n' "Installed to ${bin_path}."
+    printf '%s\n' "To pair this computer, run: ${setup_hint}"
   fi
 fi
 if [ "$ran_setup" -eq 0 ] && [ -x "$bin_path" ] && ! dir_on_path "$install_dir"; then
-  echo "Note: ${install_dir} is not on PATH; open a new terminal or log in again, or use ${quoted_bin} until then."
+  printf '%s\n' "Note: ${install_dir} is not on PATH; open a new terminal or log in again, or use ${quoted_bin} until then."
 fi

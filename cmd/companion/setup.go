@@ -341,7 +341,8 @@ func setupCommand(ctx context.Context, home string, args []string, d setupDeps) 
 	if serviceStarted {
 		fmt.Fprintln(d.out, "  - Companion service: installed and running")
 	} else {
-		fmt.Fprintf(d.out, "  - Companion service: installed and paused (start with: %s)\n", resumeCmd)
+		fmt.Fprintln(d.out, "  - Companion service: installed and paused")
+		fmt.Fprintf(d.out, "  - Start the service with: %s\n", resumeCmd)
 	}
 	if trayNote != "" {
 		fmt.Fprintf(d.out, "  - System tray: %s\n", trayNote)

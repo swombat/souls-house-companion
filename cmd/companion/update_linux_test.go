@@ -616,8 +616,9 @@ exit 0
 
 		// Noninteractive fresh install with spaces in install/state dirs:
 		// setup hint must carry --state-dir and shell-quote both paths.
+		// Include \c in the state path to verify printf (not echo) preserves backslashes under dash.
 		spacedInstallDir := filepath.Join(home, "my bin")
-		spacedStateDir := filepath.Join(home, "my state")
+		spacedStateDir := filepath.Join(home, `my\c state`)
 		cmdSpaced := exec.Command("sh", scriptPath,
 			"--install-dir", spacedInstallDir,
 			"--state-dir", spacedStateDir,
