@@ -5,7 +5,10 @@ import (
 	"io"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/swombat/souls-house-companion/internal/client"
 	"github.com/swombat/souls-house-companion/internal/policy"
@@ -77,20 +80,33 @@ func summarizeCeilingVolumes(p policy.Policy, mounts []volumes.Mount, mountsKnow
 	if len(accessByVol) == 0 {
 		return "none"
 	}
+	type deniedMount struct {
+		mountpoint string
+		reason     string
+	}
 	mountByKey := make(map[string]string, len(mounts))
+	deniedByKey := make(map[string]deniedMount)
 	for _, m := range mounts {
-		if m.Key == "" || m.Denied != "" || m.Mountpoint == "" {
+		if m.Key == "" {
 			continue
 		}
-		if _, exists := mountByKey[m.Key]; !exists {
-			mountByKey[m.Key] = m.Mountpoint
+		if m.Denied != "" {
+			if _, exists := deniedByKey[m.Key]; !exists {
+				deniedByKey[m.Key] = deniedMount{mountpoint: m.Mountpoint, reason: m.Denied}
+			}
+			continue
+		}
+		if m.Mountpoint != "" {
+			if _, exists := mountByKey[m.Key]; !exists {
+				mountByKey[m.Key] = m.Mountpoint
+			}
 		}
 	}
 	type entry struct {
-		mounted bool
-		label   string
-		key     string
-		text    string
+		rank  int
+		label string
+		key   string
+		text  string
 	}
 	entries := make([]entry, 0, len(accessByVol))
 	for k, access := range accessByVol {
@@ -99,31 +115,45 @@ func summarizeCeilingVolumes(p policy.Policy, mounts []volumes.Mount, mountsKnow
 			mode = "read/write"
 		}
 		if mp, ok := mountByKey[k]; ok {
+			label := escapeStatusText(mp)
 			entries = append(entries, entry{
-				mounted: true,
-				label:   mp,
-				key:     k,
-				text:    fmt.Sprintf("%s (%s)", mp, mode),
+				rank:  0,
+				label: label,
+				key:   k,
+				text:  fmt.Sprintf("%s (%s)", label, mode),
+			})
+		} else if d, ok := deniedByKey[k]; ok {
+			label := escapeStatusText(d.mountpoint)
+			if label == "" {
+				label = escapeStatusText(k)
+			}
+			entries = append(entries, entry{
+				rank:  1,
+				label: label,
+				key:   k,
+				text:  fmt.Sprintf("%s (%s, unavailable: %s)", label, mode, escapeStatusText(d.reason)),
 			})
 		} else if mountsKnown {
+			label := escapeStatusText(k)
 			entries = append(entries, entry{
-				mounted: false,
-				label:   k,
-				key:     k,
-				text:    fmt.Sprintf("%s (%s, not mounted)", k, mode),
+				rank:  2,
+				label: label,
+				key:   k,
+				text:  fmt.Sprintf("%s (%s, mount unavailable)", label, mode),
 			})
 		} else {
+			label := escapeStatusText(k)
 			entries = append(entries, entry{
-				mounted: false,
-				label:   k,
-				key:     k,
-				text:    fmt.Sprintf("%s (%s)", k, mode),
+				rank:  2,
+				label: label,
+				key:   k,
+				text:  fmt.Sprintf("%s (%s)", label, mode),
 			})
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].mounted != entries[j].mounted {
-			return entries[i].mounted
+		if entries[i].rank != entries[j].rank {
+			return entries[i].rank < entries[j].rank
 		}
 		if entries[i].label != entries[j].label {
 			return entries[i].label < entries[j].label
@@ -135,6 +165,29 @@ func summarizeCeilingVolumes(p policy.Policy, mounts []volumes.Mount, mountsKnow
 		parts[i] = e.text
 	}
 	return strings.Join(parts, ", ")
+}
+
+// escapeStatusText escapes non-printing characters (such as newlines, tabs,
+// and control bytes) so untrusted mount names cannot break single-line status
+// output, while leaving ordinary paths like "/" readable.
+func escapeStatusText(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			fmt.Fprintf(&b, "\\x%02x", s[i])
+			i++
+			continue
+		}
+		if unicode.IsPrint(r) {
+			b.WriteRune(r)
+		} else {
+			q := strconv.QuoteRune(r)
+			b.WriteString(q[1 : len(q)-1])
+		}
+		i += size
+	}
+	return b.String()
 }
 
 func writeUninstallSummary(w io.Writer, wasUninstalled, removedService bool, unitPath, removedTray, stateDir, binDir string) error {

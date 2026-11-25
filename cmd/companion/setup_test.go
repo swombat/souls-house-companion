@@ -726,6 +726,8 @@ func TestHumanStatusVolumes(t *testing.T) {
 					Volumes: []policy.Grant{
 						{Volume: "linux-volume:aaa111", Access: policy.Read},
 						{Volume: "linux-volume:bbb222", Access: policy.Write},
+						{Volume: "linux-volume:ccc333", Access: policy.Read},
+						{Volume: "linux-volume:ddd444", Access: policy.Read},
 					},
 				},
 			},
@@ -734,7 +736,8 @@ func TestHumanStatusVolumes(t *testing.T) {
 
 	mounts := []volumes.Mount{
 		{Key: "linux-volume:aaa111", Mountpoint: "/", Filesystem: "ext4"},
-		{Key: "linux-volume:bbb222", Mountpoint: "/mnt/denied", Denied: "unsupported filesystem"},
+		{Key: "linux-volume:bbb222", Mountpoint: "/mnt/denied", Denied: "stacked mounts"},
+		{Key: "linux-volume:ddd444", Mountpoint: "/mnt/bad\nline\tname", Filesystem: "ext4"},
 	}
 
 	var buf bytes.Buffer
@@ -742,23 +745,26 @@ func TestHumanStatusVolumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := buf.String()
-	wantLine := "Volumes: / (read), linux-volume:bbb222 (read/write, not mounted)\n"
+	wantLine := "Volumes: / (read), /mnt/bad\\nline\\tname (read), /mnt/denied (read/write, unavailable: stacked mounts), linux-volume:ccc333 (read, mount unavailable)\n"
 	if !strings.Contains(got, wantLine) {
 		t.Fatalf("expected %q in human status, got:\n%s", wantLine, got)
 	}
 	if strings.Contains(got, "linux-volume:aaa111") {
 		t.Fatalf("mounted volume should print mountpoint, not raw key:\n%s", got)
 	}
-	if strings.Contains(got, "/mnt/denied") {
-		t.Fatalf("denied mount must not be shown as mounted:\n%s", got)
+	if strings.Contains(got, "not mounted") {
+		t.Fatalf("absent key must not claim 'not mounted':\n%s", got)
+	}
+	if strings.Contains(got, "/mnt/bad\n") {
+		t.Fatalf("mountpoint newline was not escaped:\n%s", got)
 	}
 
-	// When mount discovery fails, fall back to keys without claiming "not mounted".
+	// When mount discovery fails, fall back to keys without claiming unavailability.
 	var errBuf bytes.Buffer
 	if err := writeHumanStatus(&errBuf, state, false, "running", nil, false); err != nil {
 		t.Fatal(err)
 	}
-	wantFallback := "Volumes: linux-volume:aaa111 (read), linux-volume:bbb222 (read/write)\n"
+	wantFallback := "Volumes: linux-volume:aaa111 (read), linux-volume:bbb222 (read/write), linux-volume:ccc333 (read), linux-volume:ddd444 (read)\n"
 	if !strings.Contains(errBuf.String(), wantFallback) {
 		t.Fatalf("expected %q when mounts unavailable, got:\n%s", wantFallback, errBuf.String())
 	}
