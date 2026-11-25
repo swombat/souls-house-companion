@@ -451,11 +451,14 @@ func TestSetupFailedStartReloadsStateUnderLock(t *testing.T) {
 }
 
 func TestSetupPathHint(t *testing.T) {
-	runSetup := func(t *testing.T, exe, pathEnv string, noStart bool) string {
+	runSetup := func(t *testing.T, exe, pathEnv string, customStateSubdir string, noStart bool) (string, string) {
 		t.Helper()
 		p := newPairHarness(t, "approved")
 		home := t.TempDir()
-		dir := filepath.Join(home, "state")
+		dir := filepath.Join(home, ".local/share/souls-house-companion")
+		if customStateSubdir != "" {
+			dir = filepath.Join(home, customStateSubdir)
+		}
 		var out bytes.Buffer
 		deps := setupDeps{
 			in:       strings.NewReader(""),
@@ -479,28 +482,70 @@ func TestSetupPathHint(t *testing.T) {
 		if err := setupCommand(context.Background(), home, args, deps); err != nil {
 			t.Fatalf("setupCommand: %v", err)
 		}
-		return out.String()
+		return out.String(), dir
 	}
 
 	exe := "/home/ada/.local/bin/souls-house-companion"
 
-	offPath := runSetup(t, exe, "/usr/local/bin:/usr/bin:/bin", true)
-	if !strings.Contains(offPath, "Check status anytime with: "+exe+" status") {
+	// Default state dir, off PATH: full path without --state-dir.
+	offPath, _ := runSetup(t, exe, "/usr/local/bin:/usr/bin:/bin", "", true)
+	if !strings.Contains(offPath, "Check status anytime with: "+exe+" status\n") {
 		t.Fatalf("expected full path in status hint when off PATH, got:\n%s", offPath)
 	}
-	if !strings.Contains(offPath, "run '"+exe+" resume' to start") {
+	if !strings.Contains(offPath, "start with: "+exe+" resume)") {
 		t.Fatalf("expected full path in resume hint when off PATH, got:\n%s", offPath)
 	}
 	if !strings.Contains(offPath, "/home/ada/.local/bin is not on PATH; open a new terminal or log in again") {
 		t.Fatalf("expected one-line PATH note when off PATH, got:\n%s", offPath)
 	}
 
-	onPath := runSetup(t, exe, "/usr/bin:/home/ada/.local/bin/:/bin", false)
-	if !strings.Contains(onPath, "Check status anytime with: souls-house-companion status") {
+	// Default state dir, on PATH: bare command and no PATH note.
+	onPath, _ := runSetup(t, exe, "/usr/bin:/home/ada/.local/bin/:/bin", "", false)
+	if !strings.Contains(onPath, "Check status anytime with: souls-house-companion status\n") {
 		t.Fatalf("expected bare command in status hint when on PATH, got:\n%s", onPath)
 	}
 	if strings.Contains(onPath, "is not on PATH") {
 		t.Fatalf("unexpected PATH note when install dir is on PATH:\n%s", onPath)
+	}
+
+	// Nondefault state dir and spaces in both executable and state paths:
+	// hints must shell-quote both paths and include --state-dir.
+	spacedExe := "/home/ada/my tools/souls-house-companion"
+	spacedOut, spacedState := runSetup(t, spacedExe, "/usr/bin:/bin", "custom state", true)
+	wantStatus := fmt.Sprintf("Check status anytime with: '%s' status --state-dir '%s'\n", spacedExe, spacedState)
+	if !strings.Contains(spacedOut, wantStatus) {
+		t.Fatalf("expected shell-quoted status hint with --state-dir:\nwant: %q\ngot:\n%s", wantStatus, spacedOut)
+	}
+	wantResume := fmt.Sprintf("start with: '%s' resume --state-dir '%s')", spacedExe, spacedState)
+	if !strings.Contains(spacedOut, wantResume) {
+		t.Fatalf("expected shell-quoted resume hint with --state-dir:\nwant: %q\ngot:\n%s", wantResume, spacedOut)
+	}
+	if !strings.Contains(spacedOut, fmt.Sprintf("or use '%s' until then.", spacedExe)) {
+		t.Fatalf("expected shell-quoted executable in PATH note, got:\n%s", spacedOut)
+	}
+}
+
+func TestAllSwitchCommandsPassPreLockGate(t *testing.T) {
+	// Every command handled by run()'s switch must pass the pre-lock command gate
+	// (failing on --help or flag parsing instead of "unknown command").
+	cases := [][]string{
+		{"accessibility", "--help"},
+		{"execute-lifecycle", "--help"},
+		{"uninstall", "--help"},
+		{"volumes", "--help"},
+		{"enroll", "--help"},
+		{"pair", "--help"},
+		{"install", "--help"},
+		{"status", "--help"},
+		{"policy", "show", "--help"},
+		{"pause", "--help"},
+		{"resume", "--help"},
+		{"serve", "--help"},
+	}
+	for _, args := range cases {
+		if err := run(args); err != nil {
+			t.Fatalf("run(%v) returned error (command missing from pre-lock gate?): %v", args, err)
+		}
 	}
 }
 
@@ -581,6 +626,44 @@ func TestStatusHumanAndJSON(t *testing.T) {
 	}
 	if strings.Contains(got, "shcd_super_secret") {
 		t.Fatalf("human status leaked credential:\n%s", got)
+	}
+
+	// Unreachable service manager must report unknown service state, never "active".
+	var unknownBuf bytes.Buffer
+	if err := writeHumanStatus(&unknownBuf, state, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(unknownBuf.String(), "Status: service state unknown (not paused)") {
+		t.Fatalf("expected unknown service state label, got:\n%s", unknownBuf.String())
+	}
+	if strings.Contains(unknownBuf.String(), "Status: active") {
+		t.Fatalf("unknown service state must not claim active:\n%s", unknownBuf.String())
+	}
+
+	var stoppedBuf bytes.Buffer
+	if err := writeHumanStatus(&stoppedBuf, state, false, "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stoppedBuf.String(), "Status: stopped (not paused)") {
+		t.Fatalf("expected stopped status label, got:\n%s", stoppedBuf.String())
+	}
+
+	var pausedBuf bytes.Buffer
+	if err := writeHumanStatus(&pausedBuf, state, true, "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(pausedBuf.String(), "Status: paused") {
+		t.Fatalf("expected paused status label, got:\n%s", pausedBuf.String())
+	}
+
+	uninstalledState := state
+	uninstalledState.Uninstalled = true
+	var uninstalledBuf bytes.Buffer
+	if err := writeHumanStatus(&uninstalledBuf, uninstalledState, true, "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(uninstalledBuf.String(), "Status: uninstalled") {
+		t.Fatalf("expected uninstalled status label, got:\n%s", uninstalledBuf.String())
 	}
 
 	captureRun := func(args []string) string {

@@ -86,6 +86,25 @@ func dirOnPath(dir, pathEnv string) bool {
 	return false
 }
 
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	safe := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '_' || c == '.' || c == '-' || c == '/' || c == ':' || c == '@' || c == '+' || c == ',') {
+			safe = false
+			break
+		}
+	}
+	if safe {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 func setupCommandRef(d setupDeps) (cmdRef, pathNote string) {
 	cmdRef = "souls-house-companion"
 	if d.executable == nil {
@@ -105,7 +124,8 @@ func setupCommandRef(d setupDeps) (cmdRef, pathNote string) {
 	if dirOnPath(exeDir, pathVal) {
 		return cmdRef, ""
 	}
-	return exe, fmt.Sprintf("Note: %s is not on PATH; open a new terminal or log in again, or use %s until then.", exeDir, exe)
+	quotedExe := shellQuote(exe)
+	return quotedExe, fmt.Sprintf("Note: %s is not on PATH; open a new terminal or log in again, or use %s until then.", exeDir, quotedExe)
 }
 
 func setupCommand(ctx context.Context, home string, args []string, d setupDeps) error {
@@ -309,12 +329,19 @@ func setupCommand(ctx context.Context, home string, args []string, d setupDeps) 
 	lingerNote := setupLinger(ctx, reader, d, *lingerMode, canPrompt)
 
 	cmdRef, pathNote := setupCommandRef(d)
+	stateFlag := ""
+	defaultDir, defErr := filepath.Abs(filepath.Join(home, ".local/share/souls-house-companion"))
+	if defErr != nil || absDir != defaultDir {
+		stateFlag = " --state-dir " + shellQuote(absDir)
+	}
+	statusCmd := fmt.Sprintf("%s status%s", cmdRef, stateFlag)
+	resumeCmd := fmt.Sprintf("%s resume%s", cmdRef, stateFlag)
 
 	fmt.Fprintln(d.out, "\nSetup complete:")
 	if serviceStarted {
 		fmt.Fprintln(d.out, "  - Companion service: installed and running")
 	} else {
-		fmt.Fprintf(d.out, "  - Companion service: installed and paused (run '%s resume' to start)\n", cmdRef)
+		fmt.Fprintf(d.out, "  - Companion service: installed and paused (start with: %s)\n", resumeCmd)
 	}
 	if trayNote != "" {
 		fmt.Fprintf(d.out, "  - System tray: %s\n", trayNote)
@@ -322,7 +349,7 @@ func setupCommand(ctx context.Context, home string, args []string, d setupDeps) 
 	if lingerNote != "" {
 		fmt.Fprintf(d.out, "  - Background lingering: %s\n", lingerNote)
 	}
-	fmt.Fprintf(d.out, "  - Check status anytime with: %s status\n", cmdRef)
+	fmt.Fprintf(d.out, "  - Check status anytime with: %s\n", statusCmd)
 	if pathNote != "" {
 		fmt.Fprintf(d.out, "  - %s\n", pathNote)
 	}

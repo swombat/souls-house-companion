@@ -24,7 +24,7 @@ func writeHumanStatus(w io.Writer, state client.State, paused bool, serviceState
 	case serviceState == "stopped":
 		statusLabel = "stopped (not paused)"
 	default:
-		statusLabel = "active (not paused)"
+		statusLabel = "service state unknown (not paused)"
 	}
 	if _, err := fmt.Fprintf(w, "Status: %s (version %s)\n", statusLabel, version); err != nil {
 		return err

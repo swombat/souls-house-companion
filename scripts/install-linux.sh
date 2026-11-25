@@ -132,6 +132,19 @@ dir_on_path() {
   return 1
 }
 
+shell_quote() {
+  case "$1" in
+    ""|*[!A-Za-z0-9_./:@+,-]*)
+      printf "'"
+      printf '%s' "$1" | sed "s/'/'\\\\''/g"
+      printf "'"
+      ;;
+    *)
+      printf '%s' "$1"
+      ;;
+  esac
+}
+
 if [ -z "$version" ]; then
   echo "install-linux.sh: --version is required when running an unstamped script" >&2
   exit 1
@@ -242,16 +255,22 @@ set -- "$@" "$staged_dir"
 "$staged_bin" "$@"
 
 ran_setup=0
+bin_path="${install_dir}/souls-house-companion"
+quoted_bin=$(shell_quote "$bin_path")
 unit_file="${HOME}/.config/systemd/user/souls-house-companion.service"
 if [ "$no_setup" -eq 0 ] && [ ! -f "${state_dir}/state.json" ] && [ ! -e "$unit_file" ]; then
   if [ -t 0 ]; then
     ran_setup=1
-    "${install_dir}/souls-house-companion" setup --state-dir "$state_dir"
+    "$bin_path" setup --state-dir "$state_dir"
   else
-    echo "Installed to ${install_dir}/souls-house-companion."
-    echo "Run '${install_dir}/souls-house-companion setup' to pair this computer."
+    setup_hint="${quoted_bin} setup"
+    if [ "$state_dir_explicit" -eq 1 ]; then
+      setup_hint="${setup_hint} --state-dir $(shell_quote "$state_dir")"
+    fi
+    echo "Installed to ${bin_path}."
+    echo "To pair this computer, run: ${setup_hint}"
   fi
 fi
-if [ "$ran_setup" -eq 0 ] && [ -x "${install_dir}/souls-house-companion" ] && ! dir_on_path "$install_dir"; then
-  echo "Note: ${install_dir} is not on PATH; open a new terminal or log in again, or use ${install_dir}/souls-house-companion until then."
+if [ "$ran_setup" -eq 0 ] && [ -x "$bin_path" ] && ! dir_on_path "$install_dir"; then
+  echo "Note: ${install_dir} is not on PATH; open a new terminal or log in again, or use ${quoted_bin} until then."
 fi

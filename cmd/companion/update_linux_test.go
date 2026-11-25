@@ -613,6 +613,29 @@ exit 0
 		if strings.Contains(string(outOn), "is not on PATH") {
 			t.Fatalf("unexpected PATH note when install dir is on PATH:\n%s", outOn)
 		}
+
+		// Noninteractive fresh install with spaces in install/state dirs:
+		// setup hint must carry --state-dir and shell-quote both paths.
+		spacedInstallDir := filepath.Join(home, "my bin")
+		spacedStateDir := filepath.Join(home, "my state")
+		cmdSpaced := exec.Command("sh", scriptPath,
+			"--install-dir", spacedInstallDir,
+			"--state-dir", spacedStateDir,
+			"--release-base-url", srv.URL,
+		)
+		cmdSpaced.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+		outSpaced, err := cmdSpaced.CombinedOutput()
+		if err != nil {
+			t.Fatalf("spaced noninteractive install failed: %v\noutput:\n%s", err, outSpaced)
+		}
+		spacedBin := filepath.Join(spacedInstallDir, "souls-house-companion")
+		wantSetupHint := fmt.Sprintf("To pair this computer, run: '%s' setup --state-dir '%s'", spacedBin, spacedStateDir)
+		if !strings.Contains(string(outSpaced), wantSetupHint) {
+			t.Fatalf("expected quoted setup hint with --state-dir:\nwant: %q\ngot:\n%s", wantSetupHint, outSpaced)
+		}
+		if !strings.Contains(string(outSpaced), fmt.Sprintf("or use '%s' until then.", spacedBin)) {
+			t.Fatalf("expected quoted binary path in PATH note:\n%s", outSpaced)
+		}
 	})
 }
 
