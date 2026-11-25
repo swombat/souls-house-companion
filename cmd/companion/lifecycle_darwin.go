@@ -47,7 +47,20 @@ func platformDiagnostic(err error) string {
 	return ""
 }
 
-func uninstallTrayUnit(_ context.Context, _ string) error { return nil }
+func uninstallTrayUnit(_ context.Context, _ string) (string, error) { return "", nil }
+
+func platformServiceSummary() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	running, err := unitRunning(ctx)
+	if err != nil {
+		return ""
+	}
+	if running {
+		return "running"
+	}
+	return "stopped"
+}
 
 func userUnitPath(home string) string {
 	return filepath.Join(home, "Library/LaunchAgents", companionLabel+".plist")

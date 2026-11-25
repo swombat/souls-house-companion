@@ -126,6 +126,11 @@ func run(args []string) error {
 		policyAction = args[1]
 		args = append([]string{"policy"}, args[2:]...)
 	}
+	switch args[0] {
+	case "accessibility", "execute-lifecycle", "uninstall", "volumes", "enroll", "pair", "install", "status", "policy", "pause", "resume", "serve":
+	default:
+		return newUserError(fmt.Sprintf("companion: unknown command %q — run 'souls-house-companion --help' for usage", sanitizeToken(args[0])), nil)
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -142,7 +147,7 @@ func run(args []string) error {
 	revokeContract := flags.Bool("revoke", false, "revoke local execute lifecycle acceptance (pause first)")
 	pairedResidents := flags.Bool("paired-residents", false, "execute-lifecycle: also set the local execute flag for every paired resident, on with --accept-contract, off with --revoke")
 	requestAccessibility := flags.Bool("request", false, "accessibility: ask the running service to request macOS Accessibility")
-	_ = flags.Bool("json", false, "machine-readable status")
+	jsonOutput := flags.Bool("json", false, "machine-readable status")
 	pairName := flags.String("name", "", "pair: name shown to the house owner")
 	pairHuman := flags.Bool("human", false, "pair: print human-readable instructions instead of JSON lines")
 	var pairVolumes stringList
@@ -237,7 +242,8 @@ func run(args []string) error {
 		defer cancel()
 		// Failure keeps the credential and local deny marker. Never silently
 		// discard the only credential while house authority remains live.
-		if !state.Uninstalled {
+		wasUninstalled := state.Uninstalled
+		if !wasUninstalled {
 			if err := client.New(nil).Revoke(ctx, state); err != nil {
 				return err
 			}
@@ -249,6 +255,7 @@ func run(args []string) error {
 		if err := disableUserUnit(ctx, unit); err != nil {
 			return err
 		}
+		removedService := false
 		if info, err := os.Lstat(unit); err == nil {
 			if !info.Mode().IsRegular() {
 				return errors.New("unit must be regular")
@@ -256,18 +263,24 @@ func run(args []string) error {
 			if err := os.Remove(unit); err != nil {
 				return err
 			}
+			removedService = true
 		} else if !os.IsNotExist(err) {
 			return err
 		}
-		if err := uninstallTrayUnit(ctx, home); err != nil {
+		removedTray, err := uninstallTrayUnit(ctx, home)
+		if err != nil {
 			return err
 		}
 		if err := reloadUserManager(); err != nil {
 			return err
 		}
+		binDir := ""
+		if exe, exeErr := os.Executable(); exeErr == nil && exe != "" {
+			binDir = filepath.Dir(exe)
+		}
 		// Credential removed durably above; keep non-secret ceiling/audit/lock
 		// and uninstall receipt for idempotent retry, never delete user files.
-		return nil
+		return writeUninstallSummary(os.Stdout, wasUninstalled, removedService, unit, removedTray, *dir, binDir)
 	case "volumes":
 		mounts, snap, err := volumes.LoadSystem()
 		if err != nil {
@@ -314,19 +327,23 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		localStatus := map[string]any{
-			"version": version, "device_id": state.DeviceID, "paused": state.Paused,
-			"enrolled": !state.Uninstalled, "ceiling": state.Ceiling,
-			"execute_lifecycle": runner.Lifecycle, "accepted_execute_lifecycle": state.ExecuteLifecycle,
-		}
+		paused := state.Paused
 		if _, markerErr := os.Lstat(filepath.Join(*dir, "paused")); !os.IsNotExist(markerErr) {
-			localStatus["paused"] = true // marker presence/error is always deny
+			paused = true // marker presence/error is always deny
 		}
-		if axtrust.Supported {
-			localStatus["accessibility"] = accessibilityStatus(*dir)
+		if *jsonOutput {
+			localStatus := map[string]any{
+				"version": version, "device_id": state.DeviceID, "paused": paused,
+				"enrolled": !state.Uninstalled, "ceiling": state.Ceiling,
+				"execute_lifecycle": runner.Lifecycle, "accepted_execute_lifecycle": state.ExecuteLifecycle,
+			}
+			if axtrust.Supported {
+				localStatus["accessibility"] = accessibilityStatus(*dir)
+			}
+			addPlatformStatus(localStatus)
+			return json.NewEncoder(os.Stdout).Encode(localStatus)
 		}
-		addPlatformStatus(localStatus)
-		return json.NewEncoder(os.Stdout).Encode(localStatus)
+		return writeHumanStatus(os.Stdout, state, paused, platformServiceSummary())
 	case "policy":
 		state, err := client.Load(*dir)
 		if err != nil {

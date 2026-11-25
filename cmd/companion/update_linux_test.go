@@ -571,6 +571,73 @@ exit 0
 			t.Fatalf("paused custom-state unit must not be stopped or started; systemctl log:\n%s", logs)
 		}
 	})
+
+	t.Run("path_note_when_install_dir_not_on_path", func(t *testing.T) {
+		srv, scriptPath := serveReleaseDir(t, distDir, ver, false)
+		home := t.TempDir()
+		installDir := filepath.Join(home, ".local", "bin")
+		stateDir := filepath.Join(home, ".local", "share", "souls-house-companion")
+
+		// Off PATH: installer prints the one-line PATH note.
+		cmdOff := exec.Command("sh", scriptPath,
+			"--install-dir", installDir,
+			"--state-dir", stateDir,
+			"--release-base-url", srv.URL,
+			"--no-setup",
+		)
+		cmdOff.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+		outOff, err := cmdOff.CombinedOutput()
+		if err != nil {
+			t.Fatalf("off-PATH install failed: %v\noutput:\n%s", err, outOff)
+		}
+		if !strings.Contains(string(outOff), installDir+" is not on PATH; open a new terminal or log in again") {
+			t.Fatalf("expected PATH note when install dir is off PATH, got:\n%s", outOff)
+		}
+		if !strings.Contains(string(outOff), filepath.Join(installDir, "souls-house-companion")) {
+			t.Fatalf("expected full binary path in PATH note, got:\n%s", outOff)
+		}
+
+		// On PATH (with --force reinstall): installer omits the PATH note.
+		cmdOn := exec.Command("sh", scriptPath,
+			"--install-dir", installDir,
+			"--state-dir", stateDir,
+			"--release-base-url", srv.URL,
+			"--no-setup",
+			"--force",
+		)
+		cmdOn.Env = []string{"HOME=" + home, "PATH=" + installDir + string(os.PathListSeparator) + os.Getenv("PATH")}
+		outOn, err := cmdOn.CombinedOutput()
+		if err != nil {
+			t.Fatalf("on-PATH install failed: %v\noutput:\n%s", err, outOn)
+		}
+		if strings.Contains(string(outOn), "is not on PATH") {
+			t.Fatalf("unexpected PATH note when install dir is on PATH:\n%s", outOn)
+		}
+
+		// Noninteractive fresh install with spaces in install/state dirs:
+		// setup hint must carry --state-dir and shell-quote both paths.
+		// Include \c in the state path to verify printf (not echo) preserves backslashes under dash.
+		spacedInstallDir := filepath.Join(home, "my bin")
+		spacedStateDir := filepath.Join(home, `my\c state`)
+		cmdSpaced := exec.Command("sh", scriptPath,
+			"--install-dir", spacedInstallDir,
+			"--state-dir", spacedStateDir,
+			"--release-base-url", srv.URL,
+		)
+		cmdSpaced.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+		outSpaced, err := cmdSpaced.CombinedOutput()
+		if err != nil {
+			t.Fatalf("spaced noninteractive install failed: %v\noutput:\n%s", err, outSpaced)
+		}
+		spacedBin := filepath.Join(spacedInstallDir, "souls-house-companion")
+		wantSetupHint := fmt.Sprintf("To pair this computer, run: '%s' setup --state-dir '%s'", spacedBin, spacedStateDir)
+		if !strings.Contains(string(outSpaced), wantSetupHint) {
+			t.Fatalf("expected quoted setup hint with --state-dir:\nwant: %q\ngot:\n%s", wantSetupHint, outSpaced)
+		}
+		if !strings.Contains(string(outSpaced), fmt.Sprintf("or use '%s' until then.", spacedBin)) {
+			t.Fatalf("expected quoted binary path in PATH note:\n%s", outSpaced)
+		}
+	})
 }
 
 // buildTinyCompanionBinary compiles a small real ELF binary for upgrade/rollback

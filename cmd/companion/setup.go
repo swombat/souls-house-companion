@@ -43,6 +43,8 @@ type setupDeps struct {
 	now         func() time.Time
 	sleep       func(context.Context, time.Duration) error
 	platform    setupPlatform
+	executable  func() (string, error)
+	pathEnv     func() string
 }
 
 func defaultSetupDeps(home string) setupDeps {
@@ -64,9 +66,66 @@ func defaultSetupDeps(home string) setupDeps {
 			snap.Close()
 			return mounts, nil
 		},
-		client:   client.New(nil),
-		platform: newSetupPlatform(),
+		client:     client.New(nil),
+		platform:   newSetupPlatform(),
+		executable: os.Executable,
+		pathEnv:    func() string { return os.Getenv("PATH") },
 	}
+}
+
+func dirOnPath(dir, pathEnv string) bool {
+	cleanDir := filepath.Clean(dir)
+	for _, entry := range filepath.SplitList(pathEnv) {
+		if entry == "" {
+			continue
+		}
+		if filepath.Clean(entry) == cleanDir {
+			return true
+		}
+	}
+	return false
+}
+
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	safe := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '_' || c == '.' || c == '-' || c == '/' || c == ':' || c == '@' || c == '+' || c == ',') {
+			safe = false
+			break
+		}
+	}
+	if safe {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func setupCommandRef(d setupDeps) (cmdRef, pathNote string) {
+	cmdRef = "souls-house-companion"
+	if d.executable == nil {
+		return cmdRef, ""
+	}
+	exe, err := d.executable()
+	if err != nil || exe == "" {
+		return cmdRef, ""
+	}
+	exeDir := filepath.Dir(exe)
+	pathVal := ""
+	if d.pathEnv != nil {
+		pathVal = d.pathEnv()
+	} else {
+		pathVal = os.Getenv("PATH")
+	}
+	if dirOnPath(exeDir, pathVal) {
+		return cmdRef, ""
+	}
+	quotedExe := shellQuote(exe)
+	return quotedExe, fmt.Sprintf("Note: %s is not on PATH; open a new terminal or log in again, or use %s until then.", exeDir, quotedExe)
 }
 
 func setupCommand(ctx context.Context, home string, args []string, d setupDeps) error {
@@ -269,11 +328,21 @@ func setupCommand(ctx context.Context, home string, args []string, d setupDeps) 
 	// Optional systemd lingering offer.
 	lingerNote := setupLinger(ctx, reader, d, *lingerMode, canPrompt)
 
+	cmdRef, pathNote := setupCommandRef(d)
+	stateFlag := ""
+	defaultDir, defErr := filepath.Abs(filepath.Join(home, ".local/share/souls-house-companion"))
+	if defErr != nil || absDir != defaultDir {
+		stateFlag = " --state-dir " + shellQuote(absDir)
+	}
+	statusCmd := fmt.Sprintf("%s status%s", cmdRef, stateFlag)
+	resumeCmd := fmt.Sprintf("%s resume%s", cmdRef, stateFlag)
+
 	fmt.Fprintln(d.out, "\nSetup complete:")
 	if serviceStarted {
 		fmt.Fprintln(d.out, "  - Companion service: installed and running")
 	} else {
-		fmt.Fprintln(d.out, "  - Companion service: installed and paused (run 'souls-house-companion resume' to start)")
+		fmt.Fprintln(d.out, "  - Companion service: installed and paused")
+		fmt.Fprintf(d.out, "  - Start the service with: %s\n", resumeCmd)
 	}
 	if trayNote != "" {
 		fmt.Fprintf(d.out, "  - System tray: %s\n", trayNote)
@@ -281,7 +350,10 @@ func setupCommand(ctx context.Context, home string, args []string, d setupDeps) 
 	if lingerNote != "" {
 		fmt.Fprintf(d.out, "  - Background lingering: %s\n", lingerNote)
 	}
-	fmt.Fprintln(d.out, "  - Check status anytime with: souls-house-companion status")
+	fmt.Fprintf(d.out, "  - Check status anytime with: %s\n", statusCmd)
+	if pathNote != "" {
+		fmt.Fprintf(d.out, "  - %s\n", pathNote)
+	}
 	return nil
 }
 
